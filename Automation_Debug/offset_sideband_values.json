@@ -1,0 +1,39 @@
+{
+      "q1": {
+            "offset": 0,
+            "sideband": -91.138
+      },
+      "q2": {
+            "sideband": -94.012
+      },
+      "q4": {
+            "sideband": -53.409
+      },
+      "q5": {
+            "sideband": -95.361
+      },
+      "rr6": {
+            "sideband": -97.453
+      },
+      "q6": {
+            "sideband": -96.303
+      },
+      "rr5": {
+            "sideband": -94.048
+      },
+      "rr4": {
+            "sideband": -96.222
+      },
+      "rr3": {
+            "sideband": -97.796
+      },
+      "rr2": {
+            "sideband": -93.131
+      },
+      "rr1": {
+            "sideband": -92.781
+      },
+      "stark_6": {
+            "sideband": -78.328
+      }
+}

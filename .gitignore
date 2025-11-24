@@ -1,0 +1,16 @@
+# Compiled Python
+__pycache__/
+*.pyc
+
+# Data files
+*.csv
+*.ods
+*.zip
+*.pdf
+*.png
+*.dll
+*.txt
+*joblib
+*.tcs
+*.bit
+
