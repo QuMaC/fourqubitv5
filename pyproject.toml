@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fourqubitv5"
+version = "0.1.0"
+requires-python = ">=3.9"
+
+[tool.setuptools.packages.find]
+include = [
+    "Configuration_Files*",
+    "Helper_Functions*",
+    "HM*",
+    "Automation*",
+    "SingleQubit_Characterization*",
+    "CrossResonance_Calibrations*",
+    "DebuggingTools*",
+    "Benchmarking*",
+]
+exclude = ["HM.data_misc*"]

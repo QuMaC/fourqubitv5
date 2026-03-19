@@ -2,7 +2,7 @@ import json
 from Helper_Functions.helper_functionsv2 import *
 from qualang_tools.units import unit
 
-path_global = r"D:\QUA\Master_Scripts\fourqubitv5 (Under Construction)"
+path_global = r"D:\QUA\Master_Scripts\fourqubitv5_Hari"
 
 u = unit()
 n_qubits = 8
@@ -36,7 +36,7 @@ chunks_per_window = 3
 arr_size = 10
 acc_data_width = 8
 
-
+# Frequency dictionaries
 
 # Cross-Kerr shifts dictionary
 with open(path_global + '/Configuration_Files/System_Parameters/CrossKerr.json') as f:
