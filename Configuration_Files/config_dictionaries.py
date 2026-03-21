@@ -105,6 +105,9 @@ with open(path_global + '/Configuration_Files/Readout_Settings/elec_delay_ns.jso
 with open(path_global + '/Configuration_Files/Readout_Settings/phase_offset_rad.json') as f:
     phase_offset_rad = json.load(f)
 
+with open(path_global + '/Configuration_Files/Readout_Settings/optimal_weights.json') as f:
+    opt_weights = json.load(f)
+
 # ==================Control Parameters===============================================
 
 with open(path_global + '/Configuration_Files/Pulse_Calibrations/pi_len_ns.json') as f:
