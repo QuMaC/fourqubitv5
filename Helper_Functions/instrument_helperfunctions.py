@@ -1,7 +1,11 @@
 from Configuration_Files.configuration_4qubitsv3 import sl_list, vna_opx_switch_map
+import os as _os
 import clr  # pythonnet
 
-clr.AddReference('mcl_RF_Switch_Controller_NET45')  # Reference the DLL
+# Load by full path so the DLL just needs to live in the same folder as this file.
+# Download from: https://www.minicircuits.com/softwaredownload/mcl_RF_Switch_Controller64_dll.zip
+_dll_path = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), 'mcl_RF_Switch_Controller_NET45.dll')
+clr.AddReference(_dll_path)
 
 from mcl_RF_Switch_Controller_NET45 import USB_RF_SwitchBox
 
