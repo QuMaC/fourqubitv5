@@ -3,6 +3,7 @@ from Helper_Functions.helper_functionsv2 import *
 from qualang_tools.units import unit
 
 path_global = r"D:\QUA\Master_Scripts\fourqubitv5_Hari"
+single_qubit_experiments_path = r"D:\QUA\Master_Scripts\fourqubitv5_Hari\HM\single_qubit_experiments"
 
 u = unit()
 n_qubits = 8
