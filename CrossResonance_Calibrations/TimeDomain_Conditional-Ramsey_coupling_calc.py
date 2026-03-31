@@ -324,3 +324,4 @@ else:
     J = np.sqrt(-1 * J_sq)
 
 print(f'Coupling is {J * 1e-3:.3f} MHz')
+plt.show()

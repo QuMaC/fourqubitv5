@@ -1,17 +1,4 @@
-"""
-qubit_spectroscopy.py
-=====================
-QUA-based qubit spectroscopy — adaptive power sweep + iterative zoom-in.
 
-Importable usage:
-    from HM.single_qubit_experiments.qubit_spectroscopy import perform_qubit_spectroscopy
-    exp = perform_qubit_spectroscopy(q_no=1, update_config=False)
-
-Direct usage:
-    python qubit_spectroscopy.py
-"""
-
-import sys
 import time
 import json
 import logging
@@ -89,6 +76,7 @@ class QubitSpectroscopy(SingleQubitExperiment):
         self.anharm_MHz    = float(kwargs.get("anharm_MHz", 280))
         self.update_config = bool(kwargs.get("update_config", False))
         self.save_data = bool(kwargs.get("save_data", False))
+        self.use_rotated = bool(kwargs.get("use_rotated", False))
         # Drive amplitude range, scaled by resonator external bandwidth.
         # This keeps the qubit drive power consistent regardless of how leaky the resonator is.
         ext_bw_path = self.system_params_path + "/external_bandwidth.json"
@@ -186,10 +174,10 @@ class QubitSpectroscopy(SingleQubitExperiment):
         Return a (forward, inverse) function pair for secondary_xaxis that
         converts IF in MHz ↔ absolute frequency in GHz using self.q_lo.
         """
-        q_lo_MHz = self.q_lo   # already in MHz (set by SingleQubitExperiment)
+        q_lo_MHz = self.q_lo_val_MHz   # already in MHz (set by SingleQubitExperiment)
 
         def if_to_ghz(x):
-            return (np.asarray(x) + q_lo_MHz) * 1e-3
+            return (np.asarray(x) + self.q_lo_val_MHz) * 1e-3
 
         def ghz_to_if(x):
             return np.asarray(x) * 1e3 - q_lo_MHz
@@ -202,6 +190,56 @@ class QubitSpectroscopy(SingleQubitExperiment):
         secax = ax.secondary_xaxis("top", functions=(fwd, inv))
         secax.set_xlabel("Abs. Freq (GHz)")
         return secax
+
+    def _processed_quadratures(self, I: np.ndarray, Q: np.ndarray):
+        """
+        Return analysis quadratures according to self.use_rotated.
+        When enabled, apply one global IQ rotation angle per trace.
+        """
+        I = np.asarray(I)
+        Q = np.asarray(Q)
+        if not self.use_rotated:
+            return I, Q
+
+        signal = I + 1j * Q
+        n_pts = len(signal)
+        if n_pts < 8:
+            return I, Q
+
+        # First-pass centering using robust medians to detect the dominant feature.
+        median_complex = np.median(signal.real) + 1j * np.median(signal.imag)
+        centered0 = signal - median_complex
+        peak_idx = int(np.argmax(np.abs(centered0)))
+
+        # Build a background mask that excludes the feature region.
+        guard = max(5, n_pts // 20)
+        lo_guard = max(0, peak_idx - guard)
+        hi_guard = min(n_pts, peak_idx + guard + 1)
+        bg_mask = np.ones(n_pts, dtype=bool)
+        bg_mask[lo_guard:hi_guard] = False
+
+        # Fallback when too many points are excluded (small traces).
+        min_bg_pts = max(6, n_pts // 4)
+        if np.count_nonzero(bg_mask) >= min_bg_pts:
+            bg_mean = np.mean(signal[bg_mask])
+        else:
+            bg_mean = np.mean(signal)
+
+        centered = signal - bg_mean
+
+        # Estimate a single complex response vector around the strongest feature.
+        half_win = max(3, n_pts // 50)
+        lo = max(0, peak_idx - half_win)
+        hi = min(n_pts, peak_idx + half_win + 1)
+        delta = np.mean(centered[lo:hi])
+
+        if np.abs(delta) < 1e-15:
+            theta = 0.0
+        else:
+            theta = -np.angle(delta)
+
+        rotated_signal = centered * np.exp(1j * theta)
+        return np.real(rotated_signal), np.imag(rotated_signal)
 
     def _run_with_live_plot(
         self,
@@ -219,15 +257,24 @@ class QubitSpectroscopy(SingleQubitExperiment):
         I, Q : np.ndarray  (final fetch after halt or completion)
         """
         res_handles = job.result_handles
-        fig, axs = plt.subplots(2, 1, sharex=True)
+        nrows = 4 if self.use_rotated else 2
+        fig, axs = plt.subplots(nrows, 1, sharex=True)
         results = fetching_tool(job, data_list=["I", "Q", "iteration"], mode="live")
         interrupt_on_close(fig, job)
 
         I, Q = None, None
         while res_handles.is_processing():
             I, Q, iteration = results.fetch_all()
+            I_proc, Q_proc = self._processed_quadratures(I, Q)
 
-            for i, (ax, data, label) in enumerate(zip(axs, [I, Q], ["I", "Q"])):
+            if self.use_rotated:
+                traces = [I, Q, I_proc, Q_proc]
+                labels = ["I_raw", "Q_raw", "I_rotated", "Q_rotated"]
+            else:
+                traces = [I, Q]
+                labels = ["I", "Q"]
+
+            for i, (ax, data, label) in enumerate(zip(axs, traces, labels)):
                 ax.cla()
                 ax.plot(freqs * 1e-6, data, marker=".", label=label)
                 ax.ticklabel_format(axis="y", style="sci", scilimits=(0, 0))
@@ -241,8 +288,8 @@ class QubitSpectroscopy(SingleQubitExperiment):
             plt.tight_layout()
             plt.pause(1)
 
-            snr_i, _ = S2N_1(normalize(I))
-            snr_q, _ = S2N_1(normalize(Q))
+            snr_i, _ = S2N_1(normalize(I_proc))
+            snr_q, _ = S2N_1(normalize(Q_proc))
             logger.debug(f"SNR_I={snr_i:.2f}  SNR_Q={snr_q:.2f}")
 
             if snr_i > snr_threshold or snr_q > snr_threshold:
@@ -283,8 +330,9 @@ class QubitSpectroscopy(SingleQubitExperiment):
             I, Q = self._run_with_live_plot(job, freqs, amp_val, snr_threshold=snr_thresh)
             qm.close()
 
-            data.append([I, Q])
-            self.data_wide.append([I, Q])
+            I_proc, Q_proc = self._processed_quadratures(I, Q)
+            data.append([I_proc, Q_proc])
+            self.data_wide.append([I_proc, Q_proc])
 
         return data, freqs
 
@@ -445,7 +493,8 @@ class QubitSpectroscopy(SingleQubitExperiment):
             I, Q = self._run_with_live_plot(job, freqs, amp_val, snr_threshold=2.0)
             qm.close()
 
-            sig = I if best_quad == 0 else Q
+            I_proc, Q_proc = self._processed_quadratures(I, Q)
+            sig = I_proc if best_quad == 0 else Q_proc
             _, fltd, w = does_signal_exist1(sig, alpha=0.5, win_s=30)
             normed = normalize(fltd[w:-w + 1])
             peaks, props = find_peaks(normed, height=0.5, prominence=0.5)
@@ -535,6 +584,10 @@ class QubitSpectroscopy(SingleQubitExperiment):
             )
         else:
             logger.info(f"f01 ≈ {f_center_MHz:.3f} MHz | 02/2 line not detected")
+            cprint(
+                f"q{self.q_no}: f02/2 line not detected; anharmonicity not updated.",
+                "red",
+            )
 
         # --- Phase 2 ---
         logger.info("Starting zoom-in sweep…")
@@ -559,10 +612,21 @@ class QubitSpectroscopy(SingleQubitExperiment):
         freqs = self.data_fin[:, 0]
         I     = self.data_fin[:, 1]
         Q     = self.data_fin[:, 2]
-        mag   = np.abs(I + 1j * Q)
+        signal = I + 1j * Q
+        mag = np.abs(signal)
+        I_proc, Q_proc = self._processed_quadratures(I, Q)
 
-        fig, axs = plt.subplots(3, 1, sharex=True, figsize=(10, 8))
-        for i, (ax, dat, label) in enumerate(zip(axs, [I, Q, mag], ["I", "Q", "|I+jQ|"])):
+        if self.use_rotated:
+            traces = [I, Q, mag, I_proc, Q_proc]
+            labels = ["I_raw", "Q_raw", "|I+jQ|", "I_rotated", "Q_rotated"]
+            nrows = 5
+        else:
+            traces = [I, Q, mag]
+            labels = ["I", "Q", "|I+jQ|"]
+            nrows = 3
+
+        fig, axs = plt.subplots(nrows, 1, sharex=True, figsize=(10, 8))
+        for i, (ax, dat, label) in enumerate(zip(axs, traces, labels)):
             ax.plot(freqs * 1e-6, dat, marker=".", label=label)
             ax.set_xlabel("IF (MHz)")
             ax.set_ylabel("Amplitude (a.u.)")
@@ -750,6 +814,7 @@ if __name__ == "__main__":
             n_samples=2000,
             f_min_MHz=-400,
             f_max_MHz=400,
+            use_rotated=True,
             update_config=False,
             save_data=False,
         )

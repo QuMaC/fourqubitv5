@@ -3,9 +3,6 @@ import os
 import numpy as np
 from pathlib import Path
 from scipy.optimize import curve_fit
-import sys
-sys.path.extend(['D:\\QUA\\Master_Scripts\\fourqubitv5 (Under Construction)'])
-
 from Configuration_Files.configuration_4qubitsv3 import *
 from Helper_Functions.instrument_helperfunctions import *
 from datetime import datetime
@@ -14,12 +11,12 @@ import time
 import scipy as sp
 
 for q_no in [
-    1,
+    # 1,
     # 2,
     # 3,
     #  4,
     #  5,
-    # 6
+    6
 ]:
 # for q_no in [3]:
 
@@ -91,28 +88,6 @@ for q_no in [
         time.sleep(0.5)
 
 
-    # def setPower_getRealImag(power_dBm, wait_time, active_channel=1):
-    #     kna.write(f":SOUR{active_channel}:POW {power_dBm}")
-    #     time.sleep(wait_time)
-    #     kna.write(f":CALC{active_channel}:MEAS{active_channel}:DATA:FDAT?")
-    #     ydata_str = kna.read()
-    #     ydata_temp = ydata_str.split(",")
-    #     y_data = np.array([float(d) for d in ydata_temp])
-    #     y_data = y_data.reshape(n_points, 2)
-    #     y_data = y_data.transpose()
-
-    # real, imag = y_data
-    #
-    # return real, imag
-
-
-    # def setPower(power_dBm, wait_time, active_channel=1):
-
-    #     kna.write(f":SOUR{active_channel}:POW {power_dBm}")
-    #     time.sleep(0.5)
-    #     power=kna.read()
-
-    #     return real, imag
 
     def save_data(data, fname, path=r"D:\BLUEFORS setup\2024-05-11 Cooldown\\"):
         data = np.transpose(data)
@@ -212,7 +187,7 @@ for q_no in [
             plt.legend()
             # plt.tight_layout()
             plt.show(block=False)
-            plt.title(f'Cavity response Real for Cavity {(2*q_no+5)%12}')
+            plt.title(f'Cavity response Real for Cavity {(2*q_no+5)%12} on rr{q_no}')
             print("Cavity Frequency = {0} GHz; Total Bandwidth = {1} MHz".format(np.round(f0, 6), np.round(1e3 * bw, 3)))
             print("Internal Bandwidth = {0} MHz; External Bandwidth = {1} MHz".format(np.round(1e3 * kint, 3),
                                                                                       np.round(1e3 * kext, 3)))
@@ -221,6 +196,10 @@ for q_no in [
         out2 = [(Qint, Qint_err), (Qext, Qext_err)]
 
         if plot:
+            fname = path + ExpName + r"\Low Temperature Response" + test_name + f'rr{q_no}_{low_power}_dB.png'
+            plt.savefig(fname=fname, bbox_inches='tight')
+            # Print as file URI so Ctrl+Click works even with spaces in the path
+            print(f"Saved low-power cavity response figure to: {Path(fname).as_uri()}")
             return out1, out2, res, np.sqrt(np.diag(cov)), fig
         else:
             return out1, out2, res, np.sqrt(np.diag(cov))
@@ -319,16 +298,7 @@ for q_no in [
     time.sleep(cmd_delay)
     kna.write(f"DISP:MEAS:Y:AUTO")
     time.sleep(cmd_delay * 0.5)
-    ## If possible, get better logic to find cavity
-    # kna.write(f"CALC1:MEAS1:FORM MLOG")
-    # time.sleep(cmd_delay)
-    # g_data = np.array(kna.query_ascii_values("CALC1:MEAS1:DATA:FDAT?"))
-    # time.sleep(cmd_delay)
-    # f_data = np.array(kna.query_ascii_values("CALC1:MEAS1:X:VAL?"))
-    # time.sleep(cmd_delay)
 
-    # np.convolve(data, weights, mode='valid')
-    # check unwrapped phase
     kna.write(f"CALC1:MEAS1:FORM UPH")
     time.sleep(cmd_delay)
     kna.write(f"DISP:MEAS:Y:AUTO")
@@ -340,7 +310,6 @@ for q_no in [
     uph_data = np.array(kna.query_ascii_values("CALC1:MEAS1:DATA:FDAT?"))
     time.sleep(cmd_delay)
     f_data = np.array(kna.query_ascii_values("CALC1:MEAS1:X:VAL?"))
-    # time.sleep(cmd_delay)
 
 
     win = 30
@@ -351,19 +320,7 @@ for q_no in [
     filt_uph_diff_dat = np.convolve(diff_uph, weights, mode='same')
     cav_ph_id = np.argmax(np.abs(filt_uph_diff_dat))
     cavity = f_data[cav_ph_id]
-    #
-    # ind = np.argmin(g_data)
-    # cav = np.min(g_data)
-    #
-    # cavity = f_data[ind]
-
-    # fl_low = cavity - 50e6
-    # fl_high = cavity + 50e6
-    #
-    # kna.write(f"SENS1:FREQ:START {fl_low}")
-    # time.sleep(cmd_delay)
-    # kna.write(f"SENS1:FREQ:STOP {fl_high}")
-    # time.sleep(cmd_delay)
+  
 
     fl_low = cavity - 15e6
     fl_high = cavity + 15e6
@@ -464,10 +421,7 @@ for q_no in [
         os.makedirs(path + ExpName + r"\Low Temperature Response" + test_name)
 
     path1 = path + ExpName + r"\Low Temperature Response" + test_name
-    fname = path + ExpName + r"\Low Temperature Response" + test_name + f'{low_power}_dB.png'
-    plt.savefig(fname=fname, bbox_inches='tight')
-    # Print as file URI so Ctrl+Click works even with spaces in the path
-    print(f"Saved low-power cavity response figure to: {Path(fname).as_uri()}")
+
 
     # plt.figure()
     # plt.plot(f_data, i_data)

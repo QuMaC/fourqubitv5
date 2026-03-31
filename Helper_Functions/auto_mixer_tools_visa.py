@@ -6,7 +6,7 @@ from abc import ABC, abstractmethod
 import numpy as np
 import pyvisa as visa
 
-
+_DEFAULT_ADDRESS = "TCPIP0::192.168.0.117::inst0::INSTR"
 class VisaSA(ABC):
     def __init__(self, address, qm):
         # Gets an existing qm, assumes there is an element called "qubit" with an operation named "test_pulse" which

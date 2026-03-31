@@ -2,6 +2,7 @@ import sys
 import time
 import json
 import logging
+import re
 from pathlib import Path
 
 import numpy as np
@@ -55,7 +56,8 @@ class VNASpectroscopy(SingleQubitExperiment):
     query_LOs     : bool  Query hardware LOs on init (default: False)
     """
 
-    VNA_IP_DEFAULT = "TCPIP0::192.168.0.27::inst0::INSTR"
+    VNA_IP_DEFAULT = "TCPIP0::192.168.0.27::hislip0::INSTR"
+    # VNA_IP_DEFAULT = "TCPIP0::192.168.0.27::inst0::INSTR"
 
     def __init__(self, q_no: int, rr_no: int = None, **kwargs):
         super().__init__(
@@ -191,9 +193,76 @@ class VNASpectroscopy(SingleQubitExperiment):
         """Open VISA connection to the VNA."""
         if self.kna is None:
             import pyvisa as visa
+
+            def _normalize_tcpip_resource(raw_resource: str) -> list[str]:
+                """
+                Build candidate VISA resource strings from user input.
+                This is intentionally permissive to handle common shorthand
+                forms (IP-only, missing board index, mixed hislip/inst0).
+                """
+                raw = str(raw_resource).strip().strip('"').strip("'")
+                if not raw:
+                    return [self.VNA_IP_DEFAULT]
+
+                candidates = []
+                seen = set()
+
+                def _add(addr: str):
+                    key = addr.upper()
+                    if key not in seen:
+                        seen.add(key)
+                        candidates.append(addr)
+
+                # Full resource provided.
+                if "::" in raw:
+                    upper_raw = raw.upper()
+                    if upper_raw.startswith("TCPIP"):
+                        _add(raw)
+                    elif upper_raw.startswith("HISLIP"):
+                        _add(f"TCPIP0::{raw}::INSTR")
+                    else:
+                        # Looks like HOST::something form without TCPIP prefix.
+                        _add(f"TCPIP0::{raw}")
+                        if not upper_raw.endswith("::INSTR") and not upper_raw.endswith("::SOCKET"):
+                            _add(f"TCPIP0::{raw}::INSTR")
+                else:
+                    # Host/IP only.
+                    host = raw
+                    _add(f"TCPIP0::{host}::inst0::INSTR")
+                    _add(f"TCPIP0::{host}::hislip0::INSTR")
+                    _add(f"TCPIP::{host}::inst0::INSTR")
+                    _add(f"TCPIP::{host}::hislip0::INSTR")
+
+                # If host is parseable, add conservative canonical variants.
+                host_match = re.match(r"^(?:TCPIP\d*::)?([^:]+)", raw, flags=re.IGNORECASE)
+                if host_match:
+                    host = host_match.group(1)
+                    _add(f"TCPIP0::{host}::inst0::INSTR")
+                    _add(f"TCPIP0::{host}::hislip0::INSTR")
+
+                return candidates
+
+            candidates = _normalize_tcpip_resource(self.vna_ip)
             self._rm = visa.ResourceManager()
-            self.kna = self._rm.open_resource(self.vna_ip)
-            logger.info(f"Connected to VNA: {self.vna_ip}")
+            last_error = None
+            for addr in candidates:
+                try:
+                    self.kna = self._rm.open_resource(addr)
+                    self.vna_ip = addr
+                    logger.info(f"Connected to VNA: {addr}")
+                    return
+                except visa.errors.VisaIOError as exc:
+                    last_error = exc
+                    logger.warning(f"VNA connect failed for '{addr}' ({exc}); trying next candidate.")
+
+            # No candidate worked; close RM before bubbling error.
+            if self._rm is not None:
+                self._rm.close()
+                self._rm = None
+            raise RuntimeError(
+                f"Could not open VNA resource from vna_ip='{self.vna_ip}'. "
+                f"Tried: {candidates}. Last VISA error: {last_error}"
+            ) from last_error
 
     def disconnect(self):
         """Close VNA connection."""
@@ -508,9 +577,9 @@ class VNASpectroscopy(SingleQubitExperiment):
         # Store calibrated frequency / IF for update_config_dicts
         # self.rr_lo is in MHz (set by SingleQubitExperiment)
         self.fr_calibrated     = f0_GHz * 1e3                     # GHz → MHz
-        self.rr_if_calibrated  = self.fr_calibrated - self.rr_lo  # MHz
+        self.rr_if_calibrated  = self.fr_calibrated - self.rr_lo_val_MHz  # MHz
         logger.info(
-            f"fr = {self.fr_calibrated:.3f} MHz | rr_LO = {self.rr_lo:.3f} MHz | "
+            f"fr = {self.fr_calibrated:.3f} MHz | rr_LO = {self.rr_lo_val_MHz:.3f} MHz | "
             f"rr_IF = {self.rr_if_calibrated:.3f} MHz"
         )
         self._make_figure(
@@ -571,6 +640,8 @@ class VNASpectroscopy(SingleQubitExperiment):
 
         # Real part + fit
         axes[0].plot(freq_GHz, r_data, label="Re(S11)")
+        axes[0].axvline(x=f0_GHz, linestyle="--", color="red", label="Resonance")
+        axes[0].axvline(x=self.rr_lo_val_MHz*1e-3, linestyle="--", color="blue", label="RR-LO")
         axes[0].plot(
             freq_GHz,
             self._lorentzian(f_data, *res),
@@ -599,6 +670,8 @@ class VNASpectroscopy(SingleQubitExperiment):
 
         # Imaginary part
         axes[1].plot(freq_GHz, i_data, color="tab:orange", label="Im(S11)")
+        axes[1].axvline(x=f0_GHz, linestyle="--", color="red", label="Resonance")
+        axes[1].axvline(x=self.rr_lo_val_MHz*1e-3, linestyle="--", color="blue", label="RR-LO")
         axes[1].set_xlabel("Frequency (GHz)")
         axes[1].set_ylabel("Im(S11)")
         axes[1].set_title(f"Imaginary — {power} dBm")
@@ -643,7 +716,7 @@ class VNASpectroscopy(SingleQubitExperiment):
         ext_path = sp_path + "/external_bandwidth.json"
         with open(ext_path, "r") as fh:
             ext_bw = json.load(fh)
-        ext_bw[rr_key] = np.round(kext_MHz, 5)
+        ext_bw[rr_key] = np.round(kext_MHz, 4)
         with open(ext_path, "w") as fh:
             json.dump(ext_bw, fh, indent=6)
         logger.info(f"external_bandwidth[{rr_key}] = {kext_MHz:.5f} MHz")
@@ -652,7 +725,7 @@ class VNASpectroscopy(SingleQubitExperiment):
         int_path = sp_path + "/internal_bandwidth.json"
         with open(int_path, "r") as fh:
             int_bw = json.load(fh)
-        int_bw[rr_key] = np.round(kint_MHz, 5)
+        int_bw[rr_key] = np.round(kint_MHz, 4)
         with open(int_path, "w") as fh:
             json.dump(int_bw, fh, indent=6)
         logger.info(f"internal_bandwidth[{rr_key}] = {kint_MHz:.5f} MHz")
@@ -676,7 +749,7 @@ class VNASpectroscopy(SingleQubitExperiment):
         rr_if_path = sp_path + "/rr_IF.json"
         with open(rr_if_path, "r") as fh:
             rr_if_dict = json.load(fh)
-        rr_if_dict[rr_key] = np.round(float(self.rr_if_calibrated), 6)
+        rr_if_dict[rr_key] = np.round(float(self.rr_if_calibrated), 4)
         with open(rr_if_path, "w") as fh:
             json.dump(rr_if_dict, fh, indent=6)
         logger.info(f"rr_IF[{rr_key}] = {self.rr_if_calibrated:.3f} MHz")
@@ -685,7 +758,7 @@ class VNASpectroscopy(SingleQubitExperiment):
         rr_lo_path = sp_path + "/rr_LO.json"
         with open(rr_lo_path, "r") as fh:
             rr_lo_dict = json.load(fh)
-        rr_lo_GHz = np.round(self.rr_lo * 1e-3, 6)   # rr_lo is in MHz
+        rr_lo_GHz = np.round(self.rr_lo_val_MHz * 1e-3, 4)   # rr_lo is in GHz
         rr_lo_dict[rr_key] = float(rr_lo_GHz)
         with open(rr_lo_path, "w") as fh:
             json.dump(rr_lo_dict, fh, indent=6)
@@ -780,7 +853,7 @@ if __name__ == "__main__":
         5,
         6,
     ]
-
+    set_time_start = time.time()
     for q in q_list:
         perform_vna_resonator_spectroscopy(
             q_no=q,
@@ -795,3 +868,7 @@ if __name__ == "__main__":
             update_config=True,
             save_data=False,
         )
+    set_time_end = time.time()
+    time_in_minutes = int((set_time_end - set_time_start) / 60)
+    time_in_seconds = int((set_time_end - set_time_start) % 60)
+    cprint(f"Total time taken for the entire set of qubits: {time_in_minutes} minutes, {time_in_seconds} seconds", "green")
