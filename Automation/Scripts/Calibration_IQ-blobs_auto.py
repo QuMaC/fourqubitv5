@@ -65,9 +65,7 @@ with program() as IQ_blobs:
         play_X180(qe)
         align(qe, rr)
         wait(wait_rr, rr)
-        # measure("readout" * amp(a_rr), rr, None,
-        #         demod.full("integW_cos", I1, out),
-        #         demod.full("integW_minus_sin", Q1, out))
+
         measure_macro(qe, rr, out, I1, Q1, pi_12=False)
         save(I1, I1_st)
         save(Q1, Q1_st)
