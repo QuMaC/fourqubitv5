@@ -1,50 +1,50 @@
 {
     "q1": {
-        "offset": -98.514,
-        "sideband": -90.944
+        "offset": -107.815,
+        "sideband": -84.264
     },
     "rr1": {
-        "offset": -103.945,
-        "sideband": -90.979
+        "offset": -104.528,
+        "sideband": -93.377
     },
     "q2": {
-        "offset": -98.958,
-        "sideband": -49.949
+        "offset": -102.232,
+        "sideband": -102.333
     },
     "rr2": {
-        "offset": -100.073,
-        "sideband": -66.791
+        "offset": -100.717,
+        "sideband": -92.236
     },
     "q3": {
-        "offset": -106.967,
-        "sideband": -91.611
+        "offset": -91.936,
+        "sideband": -101.741
     },
     "rr3": {
-        "offset": -81.092,
-        "sideband": -94.749
+        "offset": -81.227,
+        "sideband": -94.309
     },
     "q4": {
-        "offset": -107.174,
-        "sideband": -106.014
+        "offset": -98.806,
+        "sideband": -91.743
     },
     "rr4": {
-        "offset": -111.261,
-        "sideband": -90.406
+        "offset": -108.595,
+        "sideband": -88.679
     },
     "q5": {
-        "offset": -105.789,
-        "sideband": -104.787
+        "offset": -101.722,
+        "sideband": -101.304
     },
     "rr5": {
-        "offset": -104.723,
-        "sideband": -96.126
+        "offset": -103.569,
+        "sideband": -100.322
     },
     "q6": {
-        "offset": -99.816,
-        "sideband": -98.563
+        "offset": -104.033,
+        "sideband": -98.837
     },
     "rr6": {
-        "offset": -106.626,
-        "sideband": -97.489
+        "offset": -109.51,
+        "sideband": -73.099
     }
 }
