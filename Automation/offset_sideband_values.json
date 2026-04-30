@@ -1,11 +1,11 @@
 {
       "q3": {
-            "offset": -98.676,
-            "sideband": 0
+            "offset": -98.705,
+            "sideband": -82.55
       },
       "rr3": {
-            "offset": -81.36,
-            "sideband": 0
+            "offset": -98.635,
+            "sideband": -99.587
       },
       "q7": {
             "offset": -111.143,
@@ -32,12 +32,12 @@
             "sideband": -91.125
       },
       "q2": {
-            "offset": -99.02,
-            "sideband": -93.743
+            "offset": -99.975,
+            "sideband": -90.061
       },
       "rr2": {
-            "offset": -100.984,
-            "sideband": -100.328
+            "offset": -99.149,
+            "sideband": -101.436
       },
       "q6": {
             "offset": -99.278,
@@ -56,11 +56,11 @@
             "sideband": -93.084
       },
       "q4": {
-            "offset": -99.572,
-            "sideband": -86.185
+            "offset": -109.729,
+            "sideband": -90.334
       },
       "rr4": {
-            "offset": -101.776,
-            "sideband": -92.98
+            "offset": -104.527,
+            "sideband": -48.184
       }
 }
