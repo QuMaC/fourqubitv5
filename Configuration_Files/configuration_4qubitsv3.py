@@ -157,8 +157,14 @@ config = config_add_common_elements(config)
 
 q_anh = {}
 
-for keys, vals in q_LO.items():
-    q_anh[keys] = q12_IF[str(i)] - q_IF[str(i)]
+# for keys, vals in q_LO.items():
+#     q_anh[keys] = q12_IF[str(i)] - q_IF[str(i)]
+for keys in q_LO.keys():
+    if keys in anharmonicities.keys():
+        q_anh[keys] = anharmonicities[keys] * u.MHz
+    else:
+        q_anh[keys] = q_IF[keys] - q12_IF[keys]
+
 
 for i in range(1, n_qubits + 1):
     q_no = i

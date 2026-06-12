@@ -36,8 +36,23 @@ samples_per_chunk = 20
 chunks_per_window = 3
 arr_size = 10
 acc_data_width = 8
+#paramp status dictionary
+with open(path_global + '/Configuration_Files/Readout_Settings/paramp_status.json') as f:
+    paramp_status_dict = json.load(f)
 
 # Frequency dictionaries
+
+# Qubit-pair coupling values: zz_khz, J_mhz, total_det_mhz, f0/f1_mhz, T2star_0/1_us
+# Keys are "c{ctrl}_t{tgt}" (e.g. "c3_t2"); values are raw floats (not scaled).
+with open(path_global + '/Configuration_Files/System_Parameters/coupling_vals.json') as f:
+    coupling_vals = json.load(f)
+
+
+with open(path_global + '/Configuration_Files/System_Parameters/anharmonicities.json') as f:
+    anharmonicities = json.load(f)
+
+with open(path_global + '/Configuration_Files/System_Parameters/fq_vals.json') as f:
+    fq_vals = json.load(f)
 
 # Cross-Kerr shifts dictionary
 with open(path_global + '/Configuration_Files/System_Parameters/CrossKerr.json') as f:
