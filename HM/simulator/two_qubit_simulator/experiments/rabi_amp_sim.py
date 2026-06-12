@@ -104,13 +104,23 @@ class RabiAmpSim(TwoQubitSimulatorBase):
 
     # -- measurement ops -----------------------------------------------------
     def _measure_ops(self):
-        """Marginal |1> (excited) and |2> (leakage) projectors on the driven qubit."""
-        I3 = qt.qeye(3)
-        proj_e = qt.basis(3, 1) * qt.basis(3, 1).dag()
-        proj_leak = qt.basis(3, 2) * qt.basis(3, 2).dag()
+        """Marginal |1> (excited) and |2> (leakage) projectors on the driven qubit.
+
+        Built from the actual per-qubit level counts, so it works for any
+        n_levels. At n_levels == 2 there is no |2> state, so the leakage
+        projector is the zero operator (P_leak reports 0, not an error).
+        """
+        n_drive = self.simulator.dims[self.drive_idx]
+        n_other = self.simulator.dims[1 - self.drive_idx]
+        I_other = qt.qeye(n_other)
+        proj_e = qt.basis(n_drive, 1) * qt.basis(n_drive, 1).dag()
+        if n_drive >= 3:
+            proj_leak = qt.basis(n_drive, 2) * qt.basis(n_drive, 2).dag()
+        else:
+            proj_leak = qt.Qobj(np.zeros((n_drive, n_drive), dtype=complex))
         if self.drive_idx == 0:
-            return qt.tensor(proj_e, I3), qt.tensor(proj_leak, I3)
-        return qt.tensor(I3, proj_e), qt.tensor(I3, proj_leak)
+            return qt.tensor(proj_e, I_other), qt.tensor(proj_leak, I_other)
+        return qt.tensor(I_other, proj_e), qt.tensor(I_other, proj_leak)
 
     # -- sweep ---------------------------------------------------------------
     def run_simulation(self, amp_list=None):

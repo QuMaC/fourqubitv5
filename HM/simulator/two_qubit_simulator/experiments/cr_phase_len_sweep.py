@@ -17,6 +17,7 @@ Outputs
 """
 
 import json
+import os
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -27,6 +28,10 @@ from HM.simulator.two_qubit_simulator.experiments.cr_len_sweep import CR_len_swe
 
 PI_TICKS = [0, np.pi / 2, np.pi, 3 * np.pi / 2, 2 * np.pi]
 PI_TICK_LABELS = ["0", r"$\pi/2$", r"$\pi$", r"$3\pi/2$", r"$2\pi$"]
+
+# All generated figures / JSON dumps land here (two_qubit_simulator/sim_media).
+MEDIA_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "sim_media")
 
 
 class CR_phase_sweep:
@@ -39,14 +44,48 @@ class CR_phase_sweep:
             len_list = np.arange(0, 2000, 50)
         self.len_list = np.asarray(len_list, dtype=float)
 
-        self.avg_x_plot_filename = kwargs.pop("avg_x_plot_filename", "cr_phase_sweep_avg_x_16ns.png")
-        self.traces_plot_filename = kwargs.pop("traces_plot_filename", "cr_phase_sweep_traces_16ns.png")
-        self.heatmap_plot_filename = kwargs.pop("heatmap_plot_filename", "cr_phase_sweep_heatmap_16ns.png")
-        self.trace_filename = kwargs.pop("trace_filename", "cr_phase_sweep_trace_16ns.json")
+        # Optional free-text label appended to the auto filename tag, handy to
+        # distinguish two runs with otherwise-identical parameters.
+        self.run_label = kwargs.pop("run_label", None)
+        # Explicit filename overrides (None => auto-generated from the run params).
+        _avg_x_override = kwargs.pop("avg_x_plot_filename", None)
+        _traces_override = kwargs.pop("traces_plot_filename", None)
+        _heatmap_override = kwargs.pop("heatmap_plot_filename", None)
+        _trace_json_override = kwargs.pop("trace_filename", None)
 
         # one CR_len_sweep instance reused for every phase point
         self.exp = CR_len_sweep(qubit_pair=qubit_pair, len_list=self.len_list, **kwargs)
+
+        # Build descriptive default filenames from the actual run config and put
+        # everything under sim_media/. Overrides (if given) win as-is.
+        os.makedirs(MEDIA_DIR, exist_ok=True)
+        tag = self._build_tag()
+        self.run_tag = tag
+        self.avg_x_plot_filename = _avg_x_override or os.path.join(
+            MEDIA_DIR, f"cr_phase_sweep_avg_x_{tag}.png")
+        self.traces_plot_filename = _traces_override or os.path.join(
+            MEDIA_DIR, f"cr_phase_sweep_traces_{tag}.png")
+        self.heatmap_plot_filename = _heatmap_override or os.path.join(
+            MEDIA_DIR, f"cr_phase_sweep_heatmap_{tag}.png")
+        self.trace_filename = _trace_json_override or os.path.join(
+            MEDIA_DIR, f"cr_phase_sweep_trace_{tag}.json")
         self.results = None
+
+    def _build_tag(self):
+        """Compact, filesystem-safe descriptor of the run, e.g.
+        ``q1q2_echoed_nsub2_nlev2_amp32MHz_ph30``."""
+        e = self.exp
+        parts = [
+            f"q{e.q_pair[0]}q{e.q_pair[1]}",
+            "echoed" if e.echoed_cr else "bare",
+            f"nsub{e.simulator.n_sub}",
+            f"nlev{e.n_levels}",
+            f"amp{e.cr_pulse_params['amp_mhz']:g}MHz",
+            f"ph{len(self.phase_list)}",
+        ]
+        if self.run_label:
+            parts.append(str(self.run_label))
+        return "_".join(parts)
 
     # -- sweep ----------------------------------------------------------------
     def run_simulation(self):
@@ -115,7 +154,7 @@ class CR_phase_sweep:
         ax.grid(alpha=0.4)
         ax.legend(fontsize=8)
         ax.set_title(f"Avg <X> vs CR phase  |  CR_amp = {self.exp.cr_pulse_params['amp_mhz']} MHz"
-                     f"  |  echoed = {self.exp.echoed_cr}")
+                     f"  |  echoed = {self.exp.echoed_cr}\n{self.run_tag}")
         fig1.tight_layout()
         fig1.savefig(self.avg_x_plot_filename, dpi=160)
         print(f"Saved {self.avg_x_plot_filename}")
@@ -153,7 +192,8 @@ class CR_phase_sweep:
         cbar.set_label("CR drive phase (rad)")
         cbar.set_ticks(PI_TICKS)
         cbar.set_ticklabels(PI_TICK_LABELS)
-        fig2.suptitle("Target Bloch components and |R| vs duration, colored by CR phase")
+        fig2.suptitle("Target Bloch components and |R| vs duration, colored by CR phase"
+                      f"\n{self.run_tag}")
         fig2.savefig(self.traces_plot_filename, dpi=160)
         print(f"Saved {self.traces_plot_filename}")
 
@@ -188,7 +228,8 @@ class CR_phase_sweep:
         cbar.set_label("expectation value")
         cbar_r = fig3.colorbar(mesh_r, ax=axes3[3, :], fraction=0.08, pad=0.02)
         cbar_r.set_label("|R|")
-        fig3.suptitle("Target Bloch components and |R|: duration x CR phase")
+        fig3.suptitle("Target Bloch components and |R|: duration x CR phase"
+                      f"\n{self.run_tag}")
         fig3.savefig(self.heatmap_plot_filename, dpi=160)
         print(f"Saved {self.heatmap_plot_filename}")
 
@@ -248,6 +289,9 @@ if __name__ == "__main__":
         "sigma_ns": 5,
         "t_flat_ns": None,
     }
+    # Two distinct runs -> two distinct sets of figures in sim_media/. Here they
+    # differ by the echo (echoed vs bare CR); the filename tag captures the
+    # difference automatically so nothing overwrites.
     exp = perform_cr_phase_sweep(
         q_pair=[1, 2],
         phase_list=np.linspace(0.0, 2 * np.pi, 30),
@@ -257,4 +301,16 @@ if __name__ == "__main__":
         parallel=True,
         max_workers=8,
         n_sub=2,
+        n_levels=2
+    )
+    exp2 = perform_cr_phase_sweep(
+        q_pair=[1, 2],
+        phase_list=np.linspace(0.0, 2 * np.pi, 30),
+        len_list=np.arange(0, 1000, 5),
+        cr_pulse_params=cr_pulse_params,
+        echoed_cr=False,
+        parallel=True,
+        max_workers=8,
+        n_sub=2,
+        n_levels=2
     )

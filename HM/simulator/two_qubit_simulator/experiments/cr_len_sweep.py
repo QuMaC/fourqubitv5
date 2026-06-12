@@ -30,6 +30,24 @@ _PAULI4 = {
 }
 
 
+def pauli_on_levels(which, n):
+    """Single-qubit X/Y/Z acting on the {|0>,|1>} subspace of an n-level qudit.
+
+    Works for any n >= 2 (entries on the |2>+ levels stay zero), so the same
+    observables are valid whether the engine runs 2-level qubits or qutrits.
+    """
+    M = np.zeros((n, n), dtype=complex)
+    if which == "X":
+        M[0, 1] = M[1, 0] = 1.0
+    elif which == "Y":
+        M[0, 1], M[1, 0] = -1j, 1j
+    elif which == "Z":
+        M[0, 0], M[1, 1] = 1.0, -1.0
+    else:
+        raise ValueError(f"unknown pauli {which!r}; expected 'X', 'Y' or 'Z'")
+    return qt.Qobj(M)
+
+
 class CR_len_sweep(TwoQubitSimulatorBase):
     def __init__(self, qubit_pair = [1,2], len_list = None, **kwargs):
         # 1 ns keeps the calibrated d_X180 arbitrary waveform on its native grid.
@@ -161,13 +179,17 @@ class CR_len_sweep(TwoQubitSimulatorBase):
         return U
 
     @staticmethod
-    def _generators_from_unitary(U_full, T_total_ns):
+    def _generators_from_unitary(U_full, T_total_ns, comp_indices=_COMP_INDICES):
         """Matrix-log extraction of (ZX, IX, ZY, IY, ZZ, IZ) in MHz.
 
         Same convention as HM/Thesis/grape/validate_simulator.py: returns MHz.
         Bloch-fit path uses int_strength * 1e3 for the same MHz scale.
+
+        comp_indices selects the |00>,|01>,|10>,|11> rows/cols out of the full
+        Hilbert space; pass the engine's comp_idx so it is correct for any
+        n_levels (defaults to the qutrit layout [0,1,3,4]).
         """
-        U_comp = U_full[np.ix_(_COMP_INDICES, _COMP_INDICES)]
+        U_comp = U_full[np.ix_(comp_indices, comp_indices)]
         Up, _ = sla.polar(U_comp)
         T_us = float(T_total_ns) * 1e-3
         H_eff_rad_per_us = 1j * sla.logm(Up) / T_us
@@ -184,7 +206,7 @@ class CR_len_sweep(TwoQubitSimulatorBase):
         x_pi = self.build_x_pi() if self.echoed_cr else None
         timeline = self._build_timeline(float(flat_len_ns), x_pi=x_pi)
         U = self._propagator_from_timeline(timeline)
-        return self._generators_from_unitary(U, total_duration_ns)
+        return self._generators_from_unitary(U, total_duration_ns, self.simulator.comp_idx)
 
     def _build_timeline(self, length, x_pi=None):
         tl = Timeline(self.channels, dt_ns=self.dt_sample_ns)
@@ -242,14 +264,10 @@ class CR_len_sweep(TwoQubitSimulatorBase):
         print(f"CR phase: {self.cr_pulse_params['phase_rad']:.4f} rad")
         n0, n1 = self.simulator.dims
         I0 = qt.qeye(n0)
-        # 2-level projector on qutrit-2
-        P01_2 = qt.Qobj(np.diag([1, 1, 0]).astype(complex)) 
-        sx_2 = qt.Qobj(np.array([[0, 1, 0], [1, 0, 0], [0, 0, 0]], dtype=complex))
-        sy_2 = qt.Qobj(np.array([[0, -1j, 0], [1j, 0, 0], [0, 0, 0]], dtype=complex))
-        sz_2 = qt.Qobj(np.array([[1, 0, 0], [0, -1, 0], [0, 0, 0]], dtype=complex))
-        X_op = qt.tensor(I0, sx_2)
-        Y_op = qt.tensor(I0, sy_2)
-        Z_op = qt.tensor(I0, sz_2)
+        # Target-qubit Pauli X/Y/Z on its {|0>,|1>} subspace (any n_levels).
+        X_op = qt.tensor(I0, pauli_on_levels("X", n1))
+        Y_op = qt.tensor(I0, pauli_on_levels("Y", n1))
+        Z_op = qt.tensor(I0, pauli_on_levels("Z", n1))
         psi00 = qt.basis(self.simulator.dims, [0, 0])
         psi10 = qt.basis(self.simulator.dims, [1, 0])
         x_pi = self.build_x_pi() if self.echoed_cr else None
@@ -529,16 +547,17 @@ if __name__ == "__main__":
         "sigma_ns": t_rise_ns*2//6, #"t_rise*2//6"
         "t_flat_ns": None,
         # "phase_rad": np.round(np.pi/4, 4),
-        "phase_rad": 2.747
+        "phase_rad": 0
     }
     print(cr_pulse_params)
     exp = perform_cr_len_sweep( 
                                 q_pair = [1,2],
-                                len_list = np.arange(0, 425, 5),
+                                len_list = np.arange(0, 2000, 5),
                                 cr_pulse_params=cr_pulse_params,
-                                echoed_cr = True,
+                                echoed_cr = False,
                                 parallel = True,
                                 max_workers=4,
-                                n_sub=2
+                                n_sub=2,
+                                n_levels = 2
                                 )
 

@@ -85,6 +85,10 @@ class TwoQubitSimulatorBase:
         self.echoed_cr = kwargs.get("echoed_cr", False)
         self.dt_sample_ns = float(kwargs.get("dt_sample_ns", DT_SAMPLE_NS))
         self.n_sub = int(kwargs.get("n_sub", 8))
+        # Number of transmon levels per qubit. 3 keeps leakage to |2>; 2 gives an
+        # ideal two-level system. The engines read n_levels off each Qubit, so this
+        # single knob propagates everywhere.
+        self.n_levels = int(kwargs.get("n_levels", 3))
         self.drive_lines = self.build_drive_lines(self.q_pair)
         self.qubits = self.build_qubits(self.q_pair)
         self.confusion_matrices = self.build_confusion_matrices(self.q_pair)
@@ -118,10 +122,10 @@ class TwoQubitSimulatorBase:
         ALPHA1_MHZ = anharmonicities[f"{q_pair[0]}"]
         ALPHA2_MHZ = anharmonicities[f"{q_pair[1]}"]
         return [
-            Qubit(anharm_MHz=ALPHA1_MHZ, frame_MHz=0, n_levels=3,
+            Qubit(anharm_MHz=ALPHA1_MHZ, frame_MHz=0, n_levels=self.n_levels,
                   f_qubit_MHz=fq_vals["fq_vals"][f"{q_pair[0]}"],
                   ro_fidelity_matrix=np.array([[1.0, 0.0], [0.0, 1.0]])),
-            Qubit(anharm_MHz=ALPHA2_MHZ, frame_MHz=-DELTA_QQ_MHZ, n_levels=3,
+            Qubit(anharm_MHz=ALPHA2_MHZ, frame_MHz=-DELTA_QQ_MHZ, n_levels=self.n_levels,
                   f_qubit_MHz=fq_vals["fq_vals"][f"{q_pair[1]}"],
                   ro_fidelity_matrix=np.array([[1.0, 0.0], [0.0, 1.0]])),
         ]

@@ -21,7 +21,10 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 
 from Configuration_Files.config_dictionaries import cr_len_ns
-from HM.simulator.two_qubit_simulator.experiments.cr_len_sweep import CR_len_sweep
+from HM.simulator.two_qubit_simulator.experiments.cr_len_sweep import (
+    CR_len_sweep,
+    pauli_on_levels,
+)
 
 # major ticks every pi/4, labeled; minor grid every pi/12
 PI_TICKS = [k * np.pi / 4 for k in range(9)]
@@ -53,14 +56,12 @@ class CR_fixed_len_phase_sweep:
     # -- sweep ----------------------------------------------------------------
     def run_simulation(self):
         sim = self.exp.simulator
-        n0, _ = sim.dims
+        n0, n1 = sim.dims
         I0 = qt.qeye(n0)
-        sx_2 = qt.Qobj(np.array([[0, 1, 0], [1, 0, 0], [0, 0, 0]], dtype=complex))
-        sy_2 = qt.Qobj(np.array([[0, -1j, 0], [1j, 0, 0], [0, 0, 0]], dtype=complex))
-        sz_2 = qt.Qobj(np.array([[1, 0, 0], [0, -1, 0], [0, 0, 0]], dtype=complex))
-        X_op = qt.tensor(I0, sx_2)
-        Y_op = qt.tensor(I0, sy_2)
-        Z_op = qt.tensor(I0, sz_2)
+        # Target-qubit Pauli X/Y/Z on its {|0>,|1>} subspace (any n_levels).
+        X_op = qt.tensor(I0, pauli_on_levels("X", n1))
+        Y_op = qt.tensor(I0, pauli_on_levels("Y", n1))
+        Z_op = qt.tensor(I0, pauli_on_levels("Z", n1))
         psi00 = qt.basis(sim.dims, [0, 0])
         psi10 = qt.basis(sim.dims, [1, 0])
 
@@ -245,11 +246,12 @@ if __name__ == "__main__":
     }
     exp = perform_cr_fixed_len_phase_sweep(
         q_pair=[1, 2],
-        phase_list=np.linspace(0.0, np.pi, 20),
+        phase_list=np.linspace(0.0, 2*np.pi, 30),
         flat_len_ns=170,  # None -> calibrated cr_len_ns.json value for the pair
         cr_pulse_params=cr_pulse_params,
-        echoed_cr=True,
+        echoed_cr=False,
         parallel=True,
         max_workers=8,
         n_sub=2,
+        n_levels=2,
     )
