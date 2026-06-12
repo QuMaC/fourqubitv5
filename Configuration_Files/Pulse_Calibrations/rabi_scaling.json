@@ -1,5 +1,5 @@
 {
-    "calibration_datetime": "2026-05-27 14:31:14",
+    "calibration_datetime": "2026-06-03 20:58:58",
     "rabi_scalings": {
         "1": {
             "I_min": -0.00019502884242009365,
@@ -23,25 +23,25 @@
             "qubit_calibration_datetime": "2026-05-27 13:47:17"
         },
         "2": {
-            "I_min": -0.000659929839799535,
-            "I_max": 0.0005502368407227056,
-            "I_mean": 2.4936649967166603e-20,
-            "Q_min": -2.8976257787639117e-05,
-            "Q_max": 3.088807404365321e-05,
-            "Q_mean": -2.40896170199123e-19,
-            "rotation_angle_rad": 3.1046101767610614,
+            "I_min": -1.3898409928570841e-05,
+            "I_max": 1.6110723727868996e-05,
+            "I_mean": 2.0667603913004928e-21,
+            "Q_min": -1.1091355348644969e-05,
+            "Q_max": 1.1017466457329366e-05,
+            "Q_mean": 1.2514911795682288e-21,
+            "rotation_angle_rad": -1.6974719420534525,
             "rotation_needs_pi_flip": true,
-            "rotation_angle_applied_rad": -0.03698247682873124,
+            "rotation_angle_applied_rad": 1.4441207115363408,
             "rotation_method": "pca",
             "rotation_flip_inference": {
                 "calib_used": "X180",
                 "zero_amp_seq": 0.01,
-                "target_pi_amp_seq": 0.3518486373403755,
+                "target_pi_amp_seq": 0.34674076230631035,
                 "nearest_pi_amp_seq": 0.35000000000000003,
-                "i_zero_local_mean": 0.9916303341075667,
-                "i_pi_local_mean": 0.017347697201483468
+                "i_zero_local_mean": 0.5558081223410185,
+                "i_pi_local_mean": 0.49221404041444267
             },
-            "qubit_calibration_datetime": "2026-05-27 14:03:39"
+            "qubit_calibration_datetime": "2026-06-03 20:58:58"
         },
         "3": {
             "I_min": -0.00041558213460532077,
