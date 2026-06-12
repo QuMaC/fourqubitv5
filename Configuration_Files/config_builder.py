@@ -1,5 +1,5 @@
 from Helper_Functions.helper_functionsv2 import *
-
+AC_AMP_FACTOR = 0.4
 
 def config_add_controller(config, con_no, dc_offsets, adc_offsets, gain_dict):
     if not "controllers" in config: config["controllers"] = {}
@@ -35,7 +35,7 @@ def config_add_common_elements(config):
                         }
 
     config["waveforms"] = {"zero_wf": {"type": "constant", "sample": 0.0},
-                           "const_wf": {"type": "constant", "sample": 0.4},
+                           "const_wf": {"type": "constant", "sample": AC_AMP_FACTOR},
                            }
 
     config["digital_waveforms"] = {"ON": {"samples": [(1, 0)]}}
@@ -167,7 +167,7 @@ def config_add_elements_q_rr(config, q_no, rr_no, dac_mapping, q_LO, q_IF, rr_LO
     ro_pulse_square = False
     if ro_pulse_square:
         config["waveforms"][f"q{rr_no}_ro_wf"] = {"type": "constant",
-                                                  "sample": 0.4 * ro_amp[str(rr_no)]}
+                                                  "sample": AC_AMP_FACTOR * ro_amp[str(rr_no)]}
 
 
     else:
