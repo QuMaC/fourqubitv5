@@ -16,3 +16,4 @@ __pycache__/
 HM/data_misc/
 
 HM/Thesis/*
+paramp_hdawg/overnight_paramp_gain_tracker.py
