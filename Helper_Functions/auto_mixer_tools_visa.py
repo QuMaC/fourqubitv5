@@ -43,8 +43,19 @@ class VisaSA(ABC):
         return amp_
 
     def __del__(self):
-        self.sa.clear()
-        self.sa.close()
+        # Best-effort cleanup: avoid destructor-time crashes for invalid/closed VISA sessions.
+        try:
+            if getattr(self, "sa", None) is not None:
+                try:
+                    self.sa.clear()
+                except Exception:
+                    pass
+                try:
+                    self.sa.close()
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     @abstractmethod
     def get_amp(self):
