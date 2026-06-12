@@ -1,4 +1,5 @@
 import time
+from datetime import datetime
 from Configuration_Files.configuration_4qubitsv3 import *
 from qm import SimulationConfig
 import os
@@ -13,7 +14,7 @@ from Helper_Functions.analysis_functions import fit_RB, power_law
 ###################
 save_data = True
 simulate = False
-pi_12 = True
+pi_12 = False
 
 op_map = {"I": "I", "X": "X180", "Y": "Y180", "X/2": "X90", "-X/2": "mX90", "Y/2": "Y90", "-Y/2": "mY90"}
 
@@ -207,7 +208,7 @@ def normalize(Qc, Q1c, Q0c):
 #############
 # execution #
 #############
-c_no, t_no = 3, 2
+c_no, t_no = 1, 2
 
 qe_c = f"q{c_no}"
 rr_c = f"rr{c_no}"
@@ -363,7 +364,18 @@ ZX_fid2_err = (2 ** 2 - 1) / 2 ** 2 * (abs(p_st_2 - p_in_2 / p_st_2) + 1 - p_st_
 ZX_fid2_err = np.round((1 - ZX_fid2_err) * 1e2, 3)
 plt.ticklabel_format(axis='y', style='sci', scilimits=(0, 0))
 
-plt.figure()
+rb_plot_dir = None
+plot_ts = None
+if save_data:
+    _now = datetime.now()
+    plot_ts = _now.strftime("%H-%M-%S")
+    _date = _now.strftime("%y-%m-%d")
+    _init = "D:/Experiments"
+    _exp_type = os.path.splitext(os.path.basename(__file__))[0]
+    rb_plot_dir = os.path.join(_init, str(ExpName), _exp_type, f"{_date}_")
+    os.makedirs(rb_plot_dir, exist_ok=True)
+
+fig_t = plt.figure()
 plt.plot(x_data_sorted, y1i, ".r", label="Standard")
 plt.plot(x_fit, power_law(x_fit, *pars1), '-r')
 plt.plot(x_data_sorted, y1ini, ".b", label="Interleaved")
@@ -379,8 +391,15 @@ plt.axhline(et_v, linestyle='--', color="orange")
 plt.legend()
 plt.grid()
 print(f"gt_v = {gt_v}, et_v = {et_v}")
+if rb_plot_dir is not None:
+    _png_t = os.path.join(
+        rb_plot_dir,
+        f"{os.path.splitext(os.path.basename(__file__))[0]}-RB_Target_C{c_no}_T{t_no}-{plot_ts}.png",
+    )
+    fig_t.savefig(_png_t, dpi=150, bbox_inches="tight")
+    print("Figure saved as:", _png_t)
 
-plt.figure()
+fig_c = plt.figure()
 plt.plot(x_data_sorted, y2i, ".r", label="Standard")
 plt.plot(x_fit, power_law(x_fit, *pars2), '-r')
 plt.plot(x_data_sorted, y2ini, ".b", label="Interleaved")
@@ -395,6 +414,15 @@ plt.axhline(ec_v, linestyle='--', color="orange")
 plt.legend()
 plt.grid()
 print(f"gc_v = {gc_v}, ec_v = {ec_v}")
+if rb_plot_dir is not None:
+    _png_c = os.path.join(
+        rb_plot_dir,
+        f"{os.path.splitext(os.path.basename(__file__))[0]}-RB_Control_C{c_no}_T{t_no}-{plot_ts}.png",
+    )
+    fig_c.savefig(_png_c, dpi=150, bbox_inches="tight")
+    print("Figure saved as:", _png_c)
+
+plt.show()
 
 if save_data is True:
     file_saver_qubit_(np.transpose([x_data_sorted, y1i]), file_name=__file__, master_folder=ExpName,
