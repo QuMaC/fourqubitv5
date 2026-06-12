@@ -14,9 +14,9 @@ simulate =False
 ###################
 # The QUA program #
 ###################
-rr_no = 6
+rr_no = 1
 q_no = rr_no
-Pi12 = True
+Pi12 = False
 qe = f"q{rr_no}"
 qe12 = f"q12_{rr_no}"
 rr = f"rr{rr_no}"
@@ -183,8 +183,8 @@ f_op_mag = np.round(abs(f0 + f1)/2, 6)
 
 plt.figure()
 plt.title(f"Dispersive shift = {disp} kHz ; Best SNR at {f_op} GHz Phase")
-plt.plot(freq_list1, phase0, label = "qubit 0", color="blue")
-plt.plot(freq_list1, phase1, label = "qubit 1", color="red")
+plt.plot(freq_list1, phase0, label = "|g>", color="blue")
+plt.plot(freq_list1, phase1, label = "|e>", color="red")
 plt.xlabel("Frequency (GHz)")
 plt.axvline(f0_res, linestyle="--", color="blue")
 plt.axvline(f1_res, linestyle="--", color="red")
@@ -194,8 +194,8 @@ plt.show(block=False)
 
 plt.figure()
 plt.title(f"Dispersive shift = {disp} kHz ; Best SNR at {f_op} GHz Real Part")
-plt.plot(freq_list1, real0, label = "qubit 0", color="blue")
-plt.plot(freq_list1, real1, label = "qubit 2", color="red")
+plt.plot(freq_list1, real0, label = "|g>", color="blue")
+plt.plot(freq_list1, real1, label = "|e>", color="red")
 plt.xlabel("Frequency (GHz)")
 plt.axvline(f0_res, linestyle="--", color="blue")
 plt.axvline(f1_res, linestyle="--", color="red")
@@ -205,14 +205,45 @@ plt.show(block=False)
 
 plt.figure()
 plt.title(f"Dispersive shift = {disp_mag} kHz ; Best SNR at {f_op_mag} GHz Magnitude Plot")
-plt.plot(freq_list1, abs(sig0), label = "qubit 0", color="blue")
-plt.plot(freq_list1, abs(sig1), label = "qubit 1", color="red")
+plt.plot(freq_list1, abs(sig0), label = "|g>", color="blue")
+plt.plot(freq_list1, abs(sig1), label = "|e>", color="red")
 plt.xlabel("Frequency (GHz)")
 plt.axvline(f0, linestyle="--", color="blue")
 plt.axvline(f1, linestyle="--", color="red")
 plt.grid()
 plt.legend()
 plt.show(block=False)
+
+# ------------------------------------------------------------
+# Simple end-of-script quick-look plot
+# ------------------------------------------------------------
+fig, axs = plt.subplots(1, 2, figsize=(12, 4.5), sharex=True)
+
+axs[0].plot(freq_list1, phase0, color="tab:blue", label="|g>")
+axs[0].plot(freq_list1, phase1, color="tab:red", label="|e>")
+axs[0].axvline(f0_res, linestyle="--", color="tab:blue", alpha=0.7)
+axs[0].axvline(f1_res, linestyle="--", color="tab:red", alpha=0.7)
+axs[0].set_title("Quick phase view")
+axs[0].set_xlabel("Frequency (GHz)")
+axs[0].set_ylabel("Phase (rad)")
+axs[0].grid(True)
+axs[0].legend()
+
+axs[1].plot(freq_list1, abs(sig0), color="tab:blue", label="|g>")
+axs[1].plot(freq_list1, abs(sig1), color="tab:red", label="|e>")
+axs[1].axvline(f0, linestyle="--", color="tab:blue", alpha=0.7)
+axs[1].axvline(f1, linestyle="--", color="tab:red", alpha=0.7)
+axs[1].set_title("Quick magnitude view")
+axs[1].set_xlabel("Frequency (GHz)")
+axs[1].set_ylabel("|I + iQ|")
+axs[1].grid(True)
+axs[1].legend()
+
+fig.suptitle(
+    f"Simple Dispersive Check | phase shift ~ {disp} kHz, mag shift ~ {disp_mag} kHz"
+)
+plt.tight_layout()
+plt.show(block=True)
 
 
 
