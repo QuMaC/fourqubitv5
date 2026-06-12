@@ -1,4 +1,4 @@
-import sys
+# import sys
 import time
 import json
 import logging
@@ -8,6 +8,7 @@ from pathlib import Path
 import numpy as np
 from scipy.optimize import curve_fit
 import matplotlib.pyplot as plt
+from sympy.logic.boolalg import false
 from termcolor import cprint
 
 from HM.single_qubit_experiments.single_qubit_base import SingleQubitExperiment
@@ -52,6 +53,7 @@ class VNASpectroscopy(SingleQubitExperiment):
     n_points      : int   Sweep points                  (default: 2001)
     cmd_delay     : float Seconds to wait after each VNA command (default: 4.0)
     update_config : bool  Also update fr/IF/LO JSON files (default: False)
+    fit_error_threshold : float  MSE above which f0 falls back to Re(S11) maximum (default: 1e-3)
     save_data     : bool  Save raw data to JSON (default: False)
     query_LOs     : bool  Query hardware LOs on init (default: False)
     """
@@ -92,6 +94,11 @@ class VNASpectroscopy(SingleQubitExperiment):
         # Whether to update fr / IF / LO config dicts after measurement
         self.turn_off_LOs = bool(kwargs.get("turn_off_LOs", False))
         self.update_config = bool(kwargs.get("update_config", False))
+        self.fr_update_tolerance_MHz = float(kwargs.get("fr_update_tolerance_MHz", 100.0))
+        fit_error_threshold = kwargs.get("fit_error_threshold", 1e-3)
+        self.fit_error_threshold = (
+            None if fit_error_threshold is None else float(fit_error_threshold)
+        )
         # Whether to route Mini-Circuits USB switches before measuring
         self.do_switch = bool(kwargs.get("do_switch", True))
 
@@ -108,61 +115,28 @@ class VNASpectroscopy(SingleQubitExperiment):
         self.fit_q_vals = None      # [(Qint, err), (Qext, err)]
         self.fit_results_hp = None
         self.fit_q_vals_hp = None
+        self.fit_model_name = None
+        self.fit_model_name_hp = None
+        self.fit_error = None
+        self.fit_error_hp = None
+        self.fit_used_maxima_fallback = False
+        self.fit_used_maxima_fallback_hp = False
+        self.prev_fr_MHz = None
+        self.fr_shift_MHz = None
+        self.fr_update_allowed = None
 
     # ------------------------------------------------------------------
     # VNA connection
     # ------------------------------------------------------------------
 
     def _turn_off_LOs(self):
-        """Store current LO frequencies and states, then turn all LOs off."""
-        self.qubit_lo_config = {}
-        self.resonator_lo_config = {}
-        qubit_ip_dict = self.LO_IP_dict['q_LO']
-        resonator_ip_dict = self.LO_IP_dict['rr_LO']
-        logger.info(f"q_LO entries: {list(qubit_ip_dict.keys())}")
-        logger.info(f"rr_LO entries: {list(resonator_ip_dict.keys())}")
-
-        rm = visa.ResourceManager()   # single RM — do NOT close individual resources mid-loop
-        try:
-            for q_ip in qubit_ip_dict.values():
-                q_lo = rm.open_resource(q_ip)
-                state_before = q_lo.query_ascii_values('OUTP:STAT?')[0]
-                freq = q_lo.query_ascii_values('SOUR:FREQ:CW?')[0]
-                self.qubit_lo_config[q_ip] = {'state': state_before, 'freq': freq}
-                q_lo.write('OUTP:STAT OFF')
-                state_after = q_lo.query_ascii_values('OUTP:STAT?')[0]
-                logger.info(f"q_LO  {q_ip}: {state_before} → {state_after}  (0=off 1=on)")
-
-            for rr_ip in resonator_ip_dict.values():
-                rr_lo = rm.open_resource(rr_ip)
-                state_before = rr_lo.query_ascii_values('OUTP:STAT?')[0]
-                freq = rr_lo.query_ascii_values('SOUR:FREQ:CW?')[0]
-                self.resonator_lo_config[rr_ip] = {'state': state_before, 'freq': freq}
-                rr_lo.write('OUTP:STAT OFF')
-                state_after = rr_lo.query_ascii_values('OUTP:STAT?')[0]
-                logger.info(f"rr_LO {rr_ip}: {state_before} → {state_after}  (0=off 1=on)")
-        finally:
-            rm.close()
-
-        logger.info("All LOs turned off")
+        """Store current LO frequencies/states, then turn all LOs off."""
+        self.turn_off_all_los()
 
 
     def _turn_on_LOs(self):
         """Restore LOs to the frequencies and states saved by _turn_off_LOs."""
-        rm = visa.ResourceManager()   # single RM — do NOT close individual resources mid-loop
-        try:
-            for q_ip, cfg in self.qubit_lo_config.items():
-                q_lo = rm.open_resource(q_ip)
-                # freq stored in Hz as returned by SOUR:FREQ:CW? — no unit suffix needed
-                q_lo.write(f'SOUR:FREQ:CW {cfg["freq"]}')
-                q_lo.write(f'OUTP:STAT {int(cfg["state"])}')
-            for rr_ip, cfg in self.resonator_lo_config.items():
-                rr_lo = rm.open_resource(rr_ip)
-                rr_lo.write(f'SOUR:FREQ:CW {cfg["freq"]}')
-                rr_lo.write(f'OUTP:STAT {int(cfg["state"])}')
-        finally:
-            rm.close()
-        logger.info("LOs restored to previous state")
+        self.restore_saved_los()
 
     def _switch_to_vna(self):
         """
@@ -321,6 +295,8 @@ class VNASpectroscopy(SingleQubitExperiment):
         return the estimated electrical delay in nanoseconds.
         """
         self._set_freq_range(self.search_f_start, self.search_f_stop)
+        cprint(self.search_f_start, "green")
+        cprint(self.search_f_stop, "green")
         self._write("CALC1:MEAS1:FORM UPH")
         self._autoscale()
 
@@ -449,6 +425,63 @@ class VNASpectroscopy(SingleQubitExperiment):
         q_vals = [(Qint, Qint_err), (Qext, Qext_err)]
         return meas_vals, q_vals, res, errs
 
+    def _fit_best_lorentzian(self, freq: np.ndarray, ydata: np.ndarray):
+        """
+        Fit both standard and flipped Lorentzian models and keep the lower-error one.
+        """
+        fits = []
+        for model_name, sign in (("lorentzian", 1.0), ("flipped_lorentzian", -1.0)):
+            fit_input = ydata if sign > 0 else -ydata
+            try:
+                meas_vals, q_vals, res, errs = self._fit_lorentzian(freq, fit_input)
+                if sign < 0:
+                    # Map fitted params back to the original, unflipped data convention.
+                    res = np.array([res[0], res[1], -res[2], -res[3]], dtype=float)
+                yfit = self._lorentzian(freq, *res)
+                mse = float(np.mean((ydata - yfit) ** 2))
+                fits.append((mse, model_name, meas_vals, q_vals, res, errs))
+            except Exception as exc:
+                logger.warning(f"{model_name} fit failed: {exc}")
+
+        if not fits:
+            raise RuntimeError("Both lorentzian and flipped_lorentzian fits failed.")
+
+        fits.sort(key=lambda item: item[0])
+        best_mse, best_name, meas_vals, q_vals, res, errs = fits[0]
+        return meas_vals, q_vals, res, errs, best_name, best_mse
+
+    @staticmethod
+    def _frequency_step_error_GHz(freq: np.ndarray) -> float:
+        """Use half a sweep step as the sampling uncertainty for a picked maximum."""
+        if len(freq) < 2:
+            return 0.0
+        step_hz = float(np.median(np.abs(np.diff(np.sort(freq)))))
+        return float(np.round(0.5 * step_hz * 1e-9, 10))
+
+    def _apply_fit_error_fallback(
+        self,
+        freq: np.ndarray,
+        ydata: np.ndarray,
+        meas_vals: list,
+        fit_error: float,
+    ):
+        """
+        Replace fitted f0 with the measured Re(S11) maximum when fit MSE is too high.
+        Bandwidth and Q values remain from the fit, since the maximum only identifies f0.
+        """
+        if self.fit_error_threshold is None:
+            return meas_vals, False, None
+        if np.isfinite(fit_error) and fit_error <= self.fit_error_threshold:
+            return meas_vals, False, None
+
+        max_idx = int(np.argmax(ydata))
+        max_f_GHz = float(np.round(freq[max_idx] * 1e-9, 10))
+        f0_err_GHz = self._frequency_step_error_GHz(freq)
+
+        fallback_vals = list(meas_vals)
+        fallback_vals[0] = (max_f_GHz, f0_err_GHz)
+        return fallback_vals, True, max_idx
+
     # ------------------------------------------------------------------
     # Core measurement sequence
     # ------------------------------------------------------------------
@@ -563,11 +596,27 @@ class VNASpectroscopy(SingleQubitExperiment):
         Fit a Lorentzian to Re(S11) at low power and produce a figure.
         Stores fit results in self.fit_results / self.fit_q_vals.
         """
-        meas_vals, q_vals, res, errs = self._fit_lorentzian(self.f_data, self.r_data)
+        (
+            meas_vals,
+            q_vals,
+            res,
+            errs,
+            fit_model_name,
+            fit_error,
+        ) = self._fit_best_lorentzian(self.f_data, self.r_data)
+        meas_vals, fit_used_maxima, max_idx = self._apply_fit_error_fallback(
+            self.f_data, self.r_data, meas_vals, fit_error
+        )
 
         self.fit_results = meas_vals
         self.fit_q_vals  = q_vals
         self.fit_res_raw = res
+        self.fit_model_name = fit_model_name
+        self.fit_error = fit_error
+        self.fit_used_maxima_fallback = fit_used_maxima
+
+        rr_key = str(self.rr_no)
+        self.prev_fr_MHz = float(self.fr_dict["fr_vals"][rr_key])
 
         f0_GHz   = float(meas_vals[0][0])
         kint_MHz = float(meas_vals[1][0])
@@ -578,16 +627,33 @@ class VNASpectroscopy(SingleQubitExperiment):
         # self.rr_lo is in MHz (set by SingleQubitExperiment)
         self.fr_calibrated     = f0_GHz * 1e3                     # GHz → MHz
         self.rr_if_calibrated  = self.fr_calibrated - self.rr_lo_val_MHz  # MHz
+        self.fr_shift_MHz = float(self.fr_calibrated - self.prev_fr_MHz)
+        self.fr_update_allowed = abs(self.fr_shift_MHz) <= self.fr_update_tolerance_MHz
         logger.info(
             f"fr = {self.fr_calibrated:.3f} MHz | rr_LO = {self.rr_lo_val_MHz:.3f} MHz | "
             f"rr_IF = {self.rr_if_calibrated:.3f} MHz"
         )
+        logger.info(
+            f"Fit model: {self.fit_model_name} | MSE = {self.fit_error:.6e} | "
+            f"prev fr = {self.prev_fr_MHz:.3f} MHz | shift = {self.fr_shift_MHz:+.3f} MHz"
+        )
+        if fit_used_maxima:
+            logger.warning(
+                f"Fit MSE {fit_error:.6e} exceeds threshold "
+                f"{self.fit_error_threshold:.6e}; using Re(S11) maximum at "
+                f"{self.f_data[max_idx] * 1e-6:.3f} MHz for f0."
+            )
         self._make_figure(
             f_data=self.f_data,
             r_data=self.r_data,
             i_data=self.i_data,
             res=res,
             meas_vals=meas_vals,
+            q_vals=q_vals,
+            fit_model_name=fit_model_name,
+            fit_error=fit_error,
+            fit_error_threshold=self.fit_error_threshold,
+            used_maxima_fallback=fit_used_maxima,
             power=self.low_power,
             title_suffix="Low Power",
         )
@@ -599,20 +665,37 @@ class VNASpectroscopy(SingleQubitExperiment):
         logger.info(f"Qint = {q_vals[0][0]:.0f} | Qext = {q_vals[1][0]:.0f}")
 
         if self.do_punchout and self.r_data_hp is not None:
-            meas_vals_hp, q_vals_hp, res_hp, _ = self._fit_lorentzian(
-                self.f_data, self.r_data_hp
+            (
+                meas_vals_hp,
+                q_vals_hp,
+                res_hp,
+                _,
+                fit_model_hp,
+                fit_error_hp,
+            ) = self._fit_best_lorentzian(self.f_data, self.r_data_hp)
+            meas_vals_hp, fit_used_maxima_hp, _ = self._apply_fit_error_fallback(
+                self.f_data, self.r_data_hp, meas_vals_hp, fit_error_hp
             )
             self.fit_results_hp = meas_vals_hp
             self.fit_q_vals_hp  = q_vals_hp
+            self.fit_model_name_hp = fit_model_hp
+            self.fit_error_hp = fit_error_hp
+            self.fit_used_maxima_fallback_hp = fit_used_maxima_hp
             self._make_figure(
                 f_data=self.f_data,
                 r_data=self.r_data_hp,
                 i_data=self.i_data_hp,
                 res=res_hp,
                 meas_vals=meas_vals_hp,
+                q_vals=q_vals_hp,
+                fit_model_name=fit_model_hp,
+                fit_error=fit_error_hp,
+                fit_error_threshold=self.fit_error_threshold,
+                used_maxima_fallback=fit_used_maxima_hp,
                 power=self.high_power,
-                title_suffix="High Power (Punch-out)",
+                title_suffix=f"High Power (Punch-out) [{fit_model_hp}]",
             )
+            logger.info(f"Punch-out fit model: {fit_model_hp} | MSE = {fit_error_hp:.6e}")
 
         return meas_vals, q_vals
 
@@ -623,6 +706,11 @@ class VNASpectroscopy(SingleQubitExperiment):
         i_data: np.ndarray,
         res: np.ndarray,
         meas_vals: list,
+        q_vals: list,
+        fit_model_name: str,
+        fit_error: float,
+        fit_error_threshold: float,
+        used_maxima_fallback: bool,
         power: float,
         title_suffix: str = "",
     ):
@@ -640,48 +728,142 @@ class VNASpectroscopy(SingleQubitExperiment):
 
         # Real part + fit
         axes[0].plot(freq_GHz, r_data, label="Re(S11)")
-        axes[0].axvline(x=f0_GHz, linestyle="--", color="red", label="Resonance")
-        axes[0].axvline(x=self.rr_lo_val_MHz*1e-3, linestyle="--", color="blue", label="RR-LO")
+        max_idx = int(np.argmax(r_data))
+        zero_phase_idx = int(np.argmin(np.abs(i_data)))
+        max_f_GHz = float(freq_GHz[max_idx])
+        zero_phase_f_GHz = float(freq_GHz[zero_phase_idx])
+        axes[0].scatter(
+            max_f_GHz,
+            r_data[max_idx],
+            color="red",
+            label=f"r_max {max_f_GHz:.6f} GHz",
+        )
+        axes[0].scatter(
+            zero_phase_f_GHz,
+            i_data[zero_phase_idx],
+            color="blue",
+            label=f"i_zero {zero_phase_f_GHz:.6f} GHz",
+        )
+        resonance_label = "Selected resonance"
+        if used_maxima_fallback:
+            resonance_label += " (maxima fallback)"
+        axes[0].axvline(
+            x=f0_GHz,
+            linestyle="--",
+            color="red",
+            label=resonance_label,
+        )
+        axes[0].axvline(
+            x=self.rr_lo_val_MHz * 1e-3,
+            linestyle="--",
+            color="blue",
+            label="RR-LO",
+        )
+        if self.prev_fr_MHz is not None:
+            axes[0].axvline(
+                x=self.prev_fr_MHz * 1e-3,
+                linestyle=":",
+                color="purple",
+                label="Prev fr",
+            )
         axes[0].plot(
             freq_GHz,
             self._lorentzian(f_data, *res),
             "r-",
             linewidth=1.8,
-            label="Lorentzian fit",
+            label=(
+                "Lorentzian fit"
+                if not used_maxima_fallback
+                else "Lorentzian fit (rejected)"
+            ),
         )
+        shift_text = "N/A"
+        if self.fr_shift_MHz is not None:
+            shift_text = f"{self.fr_shift_MHz:+.3f} MHz"
+        threshold_text = (
+            "off" if fit_error_threshold is None else f"{fit_error_threshold:.3e}"
+        )
+        f0_source = "Re(S11) max" if used_maxima_fallback else "fit"
         info = (
             f"f\u2080 = {f0_GHz:.6f} GHz\n"
             f"BW = {bw_MHz:.3f} MHz\n"
             f"\u03baint = {kint_MHz:.3f} MHz\n"
             f"\u03baext = {kext_MHz:.3f} MHz\n"
-            f"Qint = {self.fit_q_vals[0][0]:.0f}\n"
-            f"Qext = {self.fit_q_vals[1][0]:.0f}"
+            f"Qint = {q_vals[0][0]:.0f}\n"
+            f"Qext = {q_vals[1][0]:.0f}\n"
+            f"\u0394fr = {shift_text}\n"
+            f"fit = {fit_model_name if fit_model_name else 'N/A'}\n"
+            f"fit MSE = {fit_error:.3e}\n"
+            f"MSE threshold = {threshold_text}\n"
+            f"f\u2080 source = {f0_source}"
         )
         axes[0].text(
             0.05, 0.95, info,
             transform=axes[0].transAxes, fontsize=9, verticalalignment="top",
             bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.5),
         )
+        if (
+            self.fr_update_allowed is False
+            and self.fr_shift_MHz is not None
+            and abs(self.fr_shift_MHz) > self.fr_update_tolerance_MHz
+        ):
+            axes[0].text(
+                0.05,
+                0.10,
+                (
+                    "fr update skipped:\n"
+                    f"|Δfr|={abs(self.fr_shift_MHz):.3f} MHz > "
+                    f"{self.fr_update_tolerance_MHz:.3f} MHz tolerance"
+                ),
+                transform=axes[0].transAxes,
+                fontsize=9,
+                color="red",
+                bbox=dict(boxstyle="round", facecolor="mistyrose", alpha=0.7),
+            )
         axes[0].set_xlabel("Frequency (GHz)")
         axes[0].set_ylabel("Re(S11)")
         axes[0].set_title(f"Real — {power} dBm")
-        axes[0].legend(fontsize=8)
+        axes[0].legend(fontsize=8, loc="upper right")
         axes[0].grid(True)
 
         # Imaginary part
         axes[1].plot(freq_GHz, i_data, color="tab:orange", label="Im(S11)")
-        axes[1].axvline(x=f0_GHz, linestyle="--", color="red", label="Resonance")
-        axes[1].axvline(x=self.rr_lo_val_MHz*1e-3, linestyle="--", color="blue", label="RR-LO")
+        axes[1].axvline(
+            x=f0_GHz,
+            linestyle="--",
+            color="red",
+            label=resonance_label,
+        )
+        axes[1].axvline(
+            x=self.rr_lo_val_MHz * 1e-3,
+            linestyle="--",
+            color="blue",
+            label="RR-LO",
+        )
+        if self.prev_fr_MHz is not None:
+            axes[1].axvline(
+                x=self.prev_fr_MHz * 1e-3,
+                linestyle=":",
+                color="purple",
+                label="Prev fr",
+            )
         axes[1].set_xlabel("Frequency (GHz)")
         axes[1].set_ylabel("Im(S11)")
         axes[1].set_title(f"Imaginary — {power} dBm")
-        axes[1].legend(fontsize=8)
+        axes[1].legend(fontsize=8, loc="upper right")
         axes[1].grid(True)
 
-        plt.tight_layout()
-        save_path = str(self.path_to_save) + f"_rr{self.rr_no}_{power}dBm.png"
-        plt.savefig(save_path, bbox_inches="tight")
-        cprint(f"Figure saved: {Path(save_path).as_uri()}", "green")
+        fig.tight_layout()
+        # Ensure the canvas is rendered before saving (prevents occasional blank exports
+        # when using interactive backends / multiple open figures).
+        try:
+            fig.canvas.draw()
+        except Exception:
+            pass
+        for extension in self.save_extension:
+            save_path = str(self.path_to_save) + f"_rr{self.rr_no}_{power}dBm.{extension}"
+            fig.savefig(save_path, bbox_inches="tight")
+            cprint(f"Figure saved: {Path(save_path).as_uri()}", "green")
         plt.show(block=False)
 
     # ------------------------------------------------------------------
@@ -714,6 +896,7 @@ class VNASpectroscopy(SingleQubitExperiment):
 
         # --- external_bandwidth.json ---
         ext_path = sp_path + "/external_bandwidth.json"
+        print(f"updating external_bandwidth.json at {ext_path}")
         with open(ext_path, "r") as fh:
             ext_bw = json.load(fh)
         ext_bw[rr_key] = np.round(kext_MHz, 4)
@@ -723,6 +906,7 @@ class VNASpectroscopy(SingleQubitExperiment):
 
         # --- internal_bandwidth.json ---
         int_path = sp_path + "/internal_bandwidth.json"
+        print(f"updating internal_bandwidth.json at {int_path}")
         with open(int_path, "r") as fh:
             int_bw = json.load(fh)
         int_bw[rr_key] = np.round(kint_MHz, 4)
@@ -733,10 +917,19 @@ class VNASpectroscopy(SingleQubitExperiment):
         if not self.update_config:
             return
 
+        if self.fr_update_allowed is False:
+            logger.warning(
+                f"Not updating fr/rr_IF/rr_LO for rr{rr_key}: "
+                f"|Δfr|={abs(self.fr_shift_MHz):.3f} MHz exceeds tolerance "
+                f"{self.fr_update_tolerance_MHz:.3f} MHz."
+            )
+            return
+
         timestamp = self.get_timestamp_str()
 
         # --- fr_vals.json ---
         fr_path = sp_path + "/fr_vals.json"
+        print(f"updating fr_vals.json at {fr_path}")
         buffer_fr = dict(self.fr_dict)
         buffer_fr["fr_vals"] = dict(buffer_fr.get("fr_vals", {}))
         buffer_fr["fr_vals"][rr_key] = float(f0_MHz)
@@ -747,6 +940,7 @@ class VNASpectroscopy(SingleQubitExperiment):
 
         # --- rr_IF.json ---
         rr_if_path = sp_path + "/rr_IF.json"
+        print(f"updating rr_IF.json at {rr_if_path}")
         with open(rr_if_path, "r") as fh:
             rr_if_dict = json.load(fh)
         rr_if_dict[rr_key] = np.round(float(self.rr_if_calibrated), 4)
@@ -756,6 +950,7 @@ class VNASpectroscopy(SingleQubitExperiment):
 
         # --- rr_LO.json ---
         rr_lo_path = sp_path + "/rr_LO.json"
+        print(f"updating rr_LO.json at {rr_lo_path}")
         with open(rr_lo_path, "r") as fh:
             rr_lo_dict = json.load(fh)
         rr_lo_GHz = np.round(self.rr_lo_val_MHz * 1e-3, 4)   # rr_lo is in GHz
@@ -788,6 +983,14 @@ class VNASpectroscopy(SingleQubitExperiment):
                 "kext_MHz": float(self.fit_results[2][0]),
                 "Qint":     float(self.fit_q_vals[0][0]),
                 "Qext":     float(self.fit_q_vals[1][0]),
+                "fit_model": self.fit_model_name,
+                "fit_mse": float(self.fit_error),
+                "fit_error_threshold": (
+                    None
+                    if self.fit_error_threshold is None
+                    else float(self.fit_error_threshold)
+                ),
+                "used_maxima_fallback": bool(self.fit_used_maxima_fallback),
             },
         }
         if self.do_punchout and self.fit_results_hp is not None:
@@ -800,6 +1003,14 @@ class VNASpectroscopy(SingleQubitExperiment):
                 "kext_MHz": float(self.fit_results_hp[2][0]),
                 "Qint":     float(self.fit_q_vals_hp[0][0]),
                 "Qext":     float(self.fit_q_vals_hp[1][0]),
+                "fit_model": self.fit_model_name_hp,
+                "fit_mse": float(self.fit_error_hp),
+                "fit_error_threshold": (
+                    None
+                    if self.fit_error_threshold is None
+                    else float(self.fit_error_threshold)
+                ),
+                "used_maxima_fallback": bool(self.fit_used_maxima_fallback_hp),
             }
 
         json_path = str(self.path_to_save) + f"_rr{self.rr_no}.json"
@@ -844,14 +1055,19 @@ def perform_vna_resonator_spectroscopy(q_no: int, rr_no: int = None, **kwargs):
 # Quick-run entry point
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    # TODO: Do all the LO's actually turn off? 
+    save_extension = [
+        "svg", 
+    # "pdf",
+    #  "png"
+     ]
+    
     q_list = [
-        1,
-        2,
+        # 1,
+        # 2,
         3,
-        4,
-        5,
-        6,
+        # 4,
+        # 5,
+        # 6,
     ]
     set_time_start = time.time()
     for q in q_list:
@@ -867,6 +1083,8 @@ if __name__ == "__main__":
             if_bw=1e3,
             update_config=True,
             save_data=False,
+            fit_error_threshold=5e-5,
+            save_extension=save_extension,
         )
     set_time_end = time.time()
     time_in_minutes = int((set_time_end - set_time_start) / 60)
