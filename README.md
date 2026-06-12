@@ -1,1 +1,1 @@
-### This repository is a collection of codes made by the QuMaC team at TIFR. 
+### This repository is a collection of codes made by the QuMaC team at TIFR.
