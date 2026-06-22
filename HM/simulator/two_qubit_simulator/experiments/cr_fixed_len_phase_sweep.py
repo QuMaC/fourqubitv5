@@ -247,11 +247,11 @@ if __name__ == "__main__":
     exp = perform_cr_fixed_len_phase_sweep(
         q_pair=[1, 2],
         phase_list=np.linspace(0.0, 2*np.pi, 30),
-        flat_len_ns=170,  # None -> calibrated cr_len_ns.json value for the pair
+        flat_len_ns=184,  # None -> calibrated cr_len_ns.json value for the pair
         cr_pulse_params=cr_pulse_params,
-        echoed_cr=False,
+        echoed_cr=True,
         parallel=True,
         max_workers=8,
         n_sub=2,
-        n_levels=2,
+        n_levels=3,
     )
