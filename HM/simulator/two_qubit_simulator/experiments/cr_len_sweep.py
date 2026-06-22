@@ -3,19 +3,73 @@ import json
 from concurrent.futures import ThreadPoolExecutor
 
 import scipy.linalg as sla
-from HM.simulator.two_qubit_simulator.engine.pulses import gaussian_flat_top
+from HM.simulator.two_qubit_simulator.engine.pulses import (
+    calibrate_f_rabi_per_opx1,
+    cr_rise_fall_flat_top,
+    drag_grft_envelope_mhz,
+)
 from Configuration_Files.config_dictionaries import *
 from HM.simulator.two_qubit_simulator.engine.pulses import Timeline
 from HM.simulator.two_qubit_simulator.base_classes.device_base import TwoQubitSimulatorBase
-from Helper_Functions.helper_functionsv2 import drag_grft_pulse_waveforms, grft_pulse
 from Helper_Functions.CR_fitters import  CR_Hamiltonian_tomography, bloch_functions
 import qutip as qt
 from tqdm import tqdm
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.ticker import FormatStrFormatter
+from matplotlib.animation import FuncAnimation, PillowWriter
 
-AC_AMP_FACTOR = 0.4  # config_builder.py: grft_arr_gen scales every waveform by 0.4
+_CTRL_COLORS = {0: "tab:blue", 1: "tab:red"}
+_CTRL_LABELS = {0: "Control off (|0⟩)", 1: "Control on (|1⟩)"}
+
+# All generated figures / JSON dumps land here (two_qubit_simulator/sim_media).
+MEDIA_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "sim_media"
+)
+
+
+def _media_path(filename):
+    """Place a bare filename under MEDIA_DIR; leave paths with a directory as-is."""
+    if os.path.dirname(filename):
+        return filename
+    return os.path.join(MEDIA_DIR, filename)
+
+
+def _draw_bloch_sphere(ax, wireframe_alpha=0.18, elev=22, azim=-58):
+    """Unit Bloch sphere wireframe and axis arrows on a 3D axes.
+
+    Matplotlib ``view_init`` angles (degrees): ``elev`` tilts the camera;
+    ``azim`` rotates about the Bloch Z axis.
+    """
+    u = np.linspace(0, 2 * np.pi, 36)
+    v = np.linspace(0, np.pi, 18)
+    x = np.outer(np.cos(u), np.sin(v))
+    y = np.outer(np.sin(u), np.sin(v))
+    z = np.outer(np.ones_like(u), np.cos(v))
+    ax.plot_wireframe(x, y, z, color="0.65", alpha=wireframe_alpha, linewidth=0.4, rstride=2, cstride=2)
+    for vec, label in zip(
+        [(1, 0, 0), (0, 1, 0), (0, 0, 1)],
+        ["X", "Y", "Z"],
+    ):
+        ax.quiver(0, 0, 0, *vec, color="0.35", arrow_length_ratio=0.08, linewidth=0.9, alpha=0.85)
+        ax.text(*(1.12 * np.asarray(vec)), label, color="0.35", fontsize=8)
+    ax.set_xlim(-1.05, 1.05)
+    ax.set_ylim(-1.05, 1.05)
+    ax.set_zlim(-1.05, 1.05)
+    ax.set_box_aspect((1, 1, 1))
+    ax.view_init(elev=elev, azim=azim)
+    ax.set_axis_off()
+
+
+def _plot_bloch_path(ax, xs, ys, zs, color, up_to=None, show_markers=True):
+    """Plot a Bloch trajectory up to index up_to (inclusive)."""
+    n = len(xs) if up_to is None else min(up_to + 1, len(xs))
+    if n == 0:
+        return
+    ax.plot(xs[:n], ys[:n], zs[:n], color=color, lw=2.0, alpha=0.9)
+    if show_markers and n > 0:
+        ax.scatter(xs[0], ys[0], zs[0], color=color, s=28, marker="o", alpha=0.55, label="start")
+        ax.scatter(xs[n - 1], ys[n - 1], zs[n - 1], color=color, s=42, marker="*", label="current")
 
 # Computational-subspace indices |00>,|01>,|10>,|11> in the qutrit tensor product.
 _COMP_INDICES = [0, 1, 3, 4]
@@ -60,15 +114,34 @@ class CR_len_sweep(TwoQubitSimulatorBase):
         self.parallel = bool(kwargs.get("parallel", True))
         self.max_workers = kwargs.get("max_workers", None)
         self.verbose = bool(kwargs.get("verbose", False))
-        self.plot_filename = kwargs.get("plot_filename", "cr_len_sweep_fit.png")
-        self.bloch_trace_filename = kwargs.get("bloch_trace_filename", "cr_len_sweep_bloch_trace.json")
+        os.makedirs(MEDIA_DIR, exist_ok=True)
+        self.plot_filename = _media_path(kwargs.get("plot_filename", "cr_len_sweep_fit.png"))
+        self.bloch_trace_filename = _media_path(
+            kwargs.get("bloch_trace_filename", "cr_len_sweep_bloch_trace.json")
+        )
+        self.save_bloch_trajectory = bool(kwargs.get("save_bloch_trajectory", False))
+        self.bloch_trajectory_gif_filename = _media_path(
+            kwargs.get("bloch_trajectory_gif_filename", "cr_len_sweep_bloch_trajectory.gif")
+        )
+        self.bloch_trajectory_png_filename = _media_path(
+            kwargs.get("bloch_trajectory_png_filename", "cr_len_sweep_bloch_trajectory.png")
+        )
+        self.bloch_gif_fps = int(kwargs.get("bloch_gif_fps", 12))
+        self.bloch_view_elev = float(kwargs.get("bloch_view_elev", 22))
+        self.bloch_view_azim = float(kwargs.get("bloch_view_azim", -58))
+        # How to pick the |R| minimum used for gate-duration extraction:
+        #   "global"         – deepest point over the full sweep (default)
+        #   "deepest_local"  – lowest among sampled local minima
+        #   "leftmost_local" – first sampled local minimum (legacy behaviour)
+        self.min_selection = str(kwargs.get("min_selection", "global"))
+        # Only search for |R| minima at or before this total pulse duration (ns).
+        self.min_max_duration_ns = float(kwargs.get("min_max_duration_ns", 1000.0))
         _default_cr_pulse_params = {
             "amp_mhz": 65.0,
-            "t_rise_ns": 16,
-            "sigma_ns": 5,
+            "t_rise_ns": int(cr_tail_ns),
             "t_flat_ns": None,
             "phase_rad": 0.0,
-        } 
+        }
         self.cr_pulse_params = kwargs.get("cr_pulse_params", _default_cr_pulse_params)
         # CR drive phase (rad). Priority: explicit phase_rad kwarg >
         # cr_pulse_params["phase_rad"] > 0. Stored in cr_pulse_params, which is
@@ -106,22 +179,22 @@ class CR_len_sweep(TwoQubitSimulatorBase):
     def _calibrate_x_pi_amp_to_mhz(self):
         """MHz Rabi rate per OPX waveform sample, fixed by the X180 calibration."""
         p = self.x_pi_pulse_params
-        a_grft = float(np.sum(grft_pulse(p["length_ns"], p["rise_ns"])))
-        a_wf_x180 = AC_AMP_FACTOR * p["amp_scale_x180"] * a_grft
-        return 0.5 / (a_wf_x180 * 1e-3)
+        return calibrate_f_rabi_per_opx1(
+            p["amp_scale_x180"], p["length_ns"], p["rise_ns"]
+        )
 
     def build_x_pi(self):
         """Calibrated complex d_X180 envelope (MHz) for the echo qubit."""
         p = self.x_pi_pulse_params
-        i_wf, q_wf = drag_grft_pulse_waveforms(
+        return drag_grft_envelope_mhz(
             amplitude=p["amp_scale_x180"],
-            length=p["length_ns"],
-            rise=p["rise_ns"],
-            anharmonicity=p["anharm_hz"],
+            length_ns=p["length_ns"],
+            rise_ns=p["rise_ns"],
+            anharm_hz=p["anharm_hz"],
             alpha=p["alpha"],
             detuning=p["det"],
+            f_rabi_per_opx1=self.f_rabi_per_opx1,
         )
-        return (np.asarray(i_wf) + 1j * np.asarray(q_wf)) * self.f_rabi_per_opx1
 
     @staticmethod
     def _to_jsonable(value):
@@ -136,23 +209,62 @@ class CR_len_sweep(TwoQubitSimulatorBase):
         return value
 
     @staticmethod
-    def _first_minimum(tlist, r_mag):
+    def _select_minimum(tlist, r_mag, mode="global", max_duration_ns=None):
         t = np.asarray(tlist, dtype=float)
         r = np.asarray(r_mag, dtype=float)
         if t.size == 0:
             raise ValueError("cannot find |R| minimum from an empty sweep")
-        if t.size < 3:
-            idx = int(np.argmin(r))
-        else:
-            local_minima = np.where((r[1:-1] <= r[:-2]) & (r[1:-1] <= r[2:]))[0] + 1
-            idx = int(local_minima[0]) if local_minima.size else int(np.argmin(r))
 
-        return {
+        search_idx = np.arange(t.size)
+        if max_duration_ns is not None:
+            mask = t <= float(max_duration_ns)
+            if not np.any(mask):
+                raise ValueError(
+                    f"no sweep points with total duration <= {max_duration_ns} ns"
+                )
+            search_idx = np.where(mask)[0]
+
+        ts = t[search_idx]
+        rs = r[search_idx]
+
+        mode = str(mode)
+        if mode == "global":
+            local_idx = int(np.argmin(rs))
+            selection = "global_minimum"
+        elif mode == "leftmost_local":
+            if ts.size < 3:
+                local_idx = int(np.argmin(rs))
+            else:
+                local_minima = np.where((rs[1:-1] <= rs[:-2]) & (rs[1:-1] <= rs[2:]))[0] + 1
+                local_idx = int(local_minima[0]) if local_minima.size else int(np.argmin(rs))
+            selection = "leftmost_sampled_local_minimum"
+        elif mode == "deepest_local":
+            if ts.size < 3:
+                local_idx = int(np.argmin(rs))
+            else:
+                local_minima = np.where((rs[1:-1] <= rs[:-2]) & (rs[1:-1] <= rs[2:]))[0] + 1
+                local_idx = (
+                    int(local_minima[np.argmin(rs[local_minima])])
+                    if local_minima.size
+                    else int(np.argmin(rs))
+                )
+            selection = "deepest_sampled_local_minimum"
+        else:
+            raise ValueError(
+                f"unknown min_selection {mode!r}; expected 'global', "
+                "'deepest_local', or 'leftmost_local'"
+            )
+
+        idx = int(search_idx[local_idx])
+        result = {
             "index": idx,
             "duration_ns": float(t[idx]),
             "r_mag": float(r[idx]),
-            "selection": "leftmost_sampled_local_minimum",
+            "selection": selection,
         }
+        if max_duration_ns is not None:
+            result["max_duration_ns"] = float(max_duration_ns)
+        return result
 
     def _flat_len_at_minimum(self, duration_info, total_duration_ns):
         """Sweep `length` passed to _build_timeline for the |R| minimum point."""
@@ -217,18 +329,16 @@ class CR_len_sweep(TwoQubitSimulatorBase):
         if self.echoed_cr:
             if x_pi is None:
                 x_pi = self.build_x_pi()
-            cr_plus = gaussian_flat_top(
+            cr_plus = cr_rise_fall_flat_top(
                 amp=cr_amp,
-                t_rise_ns=self.cr_pulse_params["t_rise_ns"],
                 t_flat_ns=length,
-                sigma_ns=self.cr_pulse_params["sigma_ns"],
+                t_rise_ns=self.cr_pulse_params["t_rise_ns"],
                 dt_ns=self.dt_sample_ns,
             )
-            cr_minus = gaussian_flat_top(
+            cr_minus = cr_rise_fall_flat_top(
                 amp=-cr_amp,
-                t_rise_ns=self.cr_pulse_params["t_rise_ns"],
                 t_flat_ns=length,
-                sigma_ns=self.cr_pulse_params["sigma_ns"],
+                t_rise_ns=self.cr_pulse_params["t_rise_ns"],
                 dt_ns=self.dt_sample_ns,
             )
             t = tl.add("cr_drive", start_ns=0.0, waveform=cr_plus)
@@ -236,14 +346,28 @@ class CR_len_sweep(TwoQubitSimulatorBase):
             t = tl.add("cr_drive", start_ns=t, waveform=cr_minus)
             tl.add(self.echo_channel, start_ns=t, waveform=x_pi)
         else:
-            cr = gaussian_flat_top(
+            cr = cr_rise_fall_flat_top(
                 amp=cr_amp,
-                t_rise_ns=self.cr_pulse_params["t_rise_ns"],
                 t_flat_ns=length,
-                sigma_ns=self.cr_pulse_params["sigma_ns"],
+                t_rise_ns=self.cr_pulse_params["t_rise_ns"],
                 dt_ns=self.dt_sample_ns,
             )
             tl.add("cr_drive", start_ns=0.0, waveform=cr)
+        return tl.finalize()
+
+    def _build_timeline_from_cr_half(self, cr_plus, x_pi=None):
+        """Echoed CR from one optimized CR-half envelope (+u → Xπ → −u → Xπ)."""
+        if not self.echoed_cr:
+            raise ValueError("_build_timeline_from_cr_half requires echoed_cr=True")
+        cr_plus = np.asarray(cr_plus, dtype=complex)
+        cr_minus = -cr_plus
+        if x_pi is None:
+            x_pi = self.build_x_pi()
+        tl = Timeline(self.channels, dt_ns=self.dt_sample_ns)
+        t = tl.add("cr_drive", start_ns=0.0, waveform=cr_plus)
+        t = tl.add(self.echo_channel, start_ns=t, waveform=x_pi)
+        t = tl.add("cr_drive", start_ns=t, waveform=cr_minus)
+        tl.add(self.echo_channel, start_ns=t, waveform=x_pi)
         return tl.finalize()
 
     def run_simulation(self, len_list = None, phase_rad = None):
@@ -342,9 +466,15 @@ class CR_len_sweep(TwoQubitSimulatorBase):
         exp_vals = [z_vals, y_vals, x_vals]
         tlist = np.asarray(results["total_durations"], dtype=float)
         r_mag = np.asarray(results["R_mag"], dtype=float)
-        duration_info = self._first_minimum(tlist, r_mag)
+        duration_info = self._select_minimum(
+            tlist,
+            r_mag,
+            mode=self.min_selection,
+            max_duration_ns=self.min_max_duration_ns,
+        )
         min_duration_ns = duration_info["duration_ns"]
         min_r_mag = duration_info["r_mag"]
+        min_label = duration_info["selection"].replace("_", " ")
 
         int_strengths, [C0, C1] = CR_Hamiltonian_tomography(exp_vals, tlist, bloch_params=True)
         # Same scaling as hardware CR-HT scripts: int_strengths * 1e3 -> MHz
@@ -359,9 +489,10 @@ class CR_len_sweep(TwoQubitSimulatorBase):
         print(f"  ZX: {ZX:.4f}, IX: {IX:.4f}, ZY: {ZY:.4f}, "
               f"IY: {IY:.4f}, ZZ: {ZZ:.4f}, IZ: {IZ:.4f}")
         print(f"C0: {C0}, C1: {C1}")
-        print(f"Leftmost |R| minimum index: {duration_info['index']}")
-        print(f"Leftmost |R| minimum duration: {min_duration_ns:.3f} ns ({min_duration_ns * 1e-3:.6f} us)")
-        print(f"Leftmost |R| minimum value: {min_r_mag:.6f}")
+        print(f"|R| minimum search window: t <= {self.min_max_duration_ns:.1f} ns")
+        print(f"|R| minimum index ({min_label}): {duration_info['index']}")
+        print(f"|R| minimum duration ({min_label}): {min_duration_ns:.3f} ns ({min_duration_ns * 1e-3:.6f} us)")
+        print(f"|R| minimum value ({min_label}): {min_r_mag:.6f}")
         if self.echoed_cr:
             x_pi_len = self.x_pi_pulse_params["length_ns"]
             cr_flat_ns = (min_duration_ns - 4 * self.cr_pulse_params["t_rise_ns"] - 2 * x_pi_len) / 2
@@ -426,7 +557,7 @@ class CR_len_sweep(TwoQubitSimulatorBase):
             ls="--",
             lw=1.2,
             alpha=0.85,
-            label=f"leftmost min at {min_duration_ns:.1f} ns",
+            label=f"{min_label} at {min_duration_ns:.1f} ns",
         )
         axes[-1].set_xlabel("Total CR pulse duration (ns)")
         axes[-1].set_ylabel("|R|")
@@ -498,9 +629,104 @@ class CR_len_sweep(TwoQubitSimulatorBase):
         with open(self.bloch_trace_filename, "w") as f:
             json.dump(self._to_jsonable(bloch_trace), f, indent=2)
         print(f"Saved {self.bloch_trace_filename}")
+
+        if self.save_bloch_trajectory:
+            self.save_bloch_trajectory_plots(results, tlist)
+
         plt.show()
 
         return int_strengths, [C0, C1]
+
+    def _bloch_trajectory_arrays(self, results):
+        """Target-qubit Bloch components (X, Y, Z) for each control state."""
+        trajectories = {}
+        for ctrl in (0, 1):
+            trajectories[ctrl] = (
+                np.asarray(results[ctrl]["X"], dtype=float),
+                np.asarray(results[ctrl]["Y"], dtype=float),
+                np.asarray(results[ctrl]["Z"], dtype=float),
+            )
+        return trajectories
+
+    def save_bloch_trajectory_png(self, results=None, tlist=None, filename=None):
+        """Save a 2x1 PNG of the full net Bloch trajectories (ctrl off | ctrl on)."""
+        results = self.results if results is None else results
+        if tlist is None:
+            tlist = np.asarray(results["total_durations"], dtype=float)
+        filename = self.bloch_trajectory_png_filename if filename is None else filename
+        trajectories = self._bloch_trajectory_arrays(results)
+
+        fig, axes = plt.subplots(2, 1, figsize=(6, 10), subplot_kw={"projection": "3d"})
+        for ax, ctrl in zip(axes, (0, 1)):
+            xs, ys, zs = trajectories[ctrl]
+            color = _CTRL_COLORS[ctrl]
+            _draw_bloch_sphere(ax, elev=self.bloch_view_elev, azim=self.bloch_view_azim)
+            _plot_bloch_path(ax, xs, ys, zs, color=color, show_markers=False)
+            ax.scatter(xs[0], ys[0], zs[0], color=color, s=36, marker="o", alpha=0.55, label="start")
+            ax.scatter(xs[-1], ys[-1], zs[-1], color=color, s=64, marker="*", label="end")
+            ax.set_title(_CTRL_LABELS[ctrl], color=color, fontsize=11)
+
+        fig.suptitle(
+            f"Target Bloch trajectories vs CR duration (0–{tlist[-1]:.0f} ns)",
+            fontsize=12,
+            y=0.98,
+        )
+        plt.tight_layout()
+        fig.savefig(filename, dpi=160, bbox_inches="tight")
+        plt.close(fig)
+        print(f"Saved {filename}")
+
+    def save_bloch_trajectory_gif(self, results=None, tlist=None, filename=None, fps=None):
+        """Save a 2x1 GIF animating the traversed Bloch paths (ctrl off | ctrl on)."""
+        results = self.results if results is None else results
+        if tlist is None:
+            tlist = np.asarray(results["total_durations"], dtype=float)
+        filename = self.bloch_trajectory_gif_filename if filename is None else filename
+        fps = self.bloch_gif_fps if fps is None else int(fps)
+        trajectories = self._bloch_trajectory_arrays(results)
+        n_frames = len(tlist)
+
+        fig, axes = plt.subplots(2, 1, figsize=(6, 10), subplot_kw={"projection": "3d"})
+        path_artists = []
+        for ax, ctrl in zip(axes, (0, 1)):
+            _draw_bloch_sphere(ax, elev=self.bloch_view_elev, azim=self.bloch_view_azim)
+            ax.set_title(_CTRL_LABELS[ctrl], color=_CTRL_COLORS[ctrl], fontsize=11)
+            xs, ys, zs = trajectories[ctrl]
+            color = _CTRL_COLORS[ctrl]
+            (line,) = ax.plot([], [], [], color=color, lw=2.0, alpha=0.9)
+            start = ax.scatter([], [], [], color=color, s=36, marker="o", alpha=0.55)
+            current = ax.scatter([], [], [], color=color, s=64, marker="*")
+            duration_text = ax.text2D(0.02, 0.02, "", transform=ax.transAxes, fontsize=9, color=color)
+            path_artists.append((line, start, current, duration_text, xs, ys, zs, color))
+
+        fig.suptitle("Target Bloch trajectories vs CR duration", fontsize=12, y=0.98)
+
+        def _update(frame_idx):
+            artists = []
+            duration_ns = float(tlist[frame_idx])
+            for line, start, current, duration_text, xs, ys, zs, color in path_artists:
+                n = frame_idx + 1
+                line.set_data(xs[:n], ys[:n])
+                line.set_3d_properties(zs[:n])
+                start._offsets3d = ([xs[0]], [ys[0]], [zs[0]])
+                current._offsets3d = ([xs[n - 1]], [ys[n - 1]], [zs[n - 1]])
+                duration_text.set_text(f"t = {duration_ns:.0f} ns")
+                artists.extend([line, start, current, duration_text])
+            return artists
+
+        anim = FuncAnimation(fig, _update, frames=n_frames, interval=1000 / fps, blit=False)
+        writer = PillowWriter(fps=fps)
+        anim.save(filename, writer=writer)
+        plt.close(fig)
+        print(f"Saved {filename} ({n_frames} frames @ {fps} fps)")
+
+    def save_bloch_trajectory_plots(self, results=None, tlist=None):
+        """Save both the static PNG and animated GIF of Bloch trajectories."""
+        results = self.results if results is None else results
+        if tlist is None:
+            tlist = np.asarray(results["total_durations"], dtype=float)
+        self.save_bloch_trajectory_png(results=results, tlist=tlist)
+        self.save_bloch_trajectory_gif(results=results, tlist=tlist)
 
 
     def bloch_evolve(self, method="rotation"):
@@ -540,24 +766,31 @@ def perform_cr_len_sweep(q_pair = [1,2], len_list = None, **kwargs):
     return exp
 
 if __name__ == "__main__":
-    t_rise_ns = 16
     cr_pulse_params = {
-        "amp_mhz": 30.0,
-        "t_rise_ns": t_rise_ns,
-        "sigma_ns": t_rise_ns*2//6, #"t_rise*2//6"
+        "amp_mhz": 32.0,
+        "t_rise_ns": int(16),
         "t_flat_ns": None,
         # "phase_rad": np.round(np.pi/4, 4),
         "phase_rad": 0
+        # "phase_rad": 0
     }
     print(cr_pulse_params)
+    n_levels = 3
+    file_suffix = f"amp_{cr_pulse_params['amp_mhz']}_t_rise_{cr_pulse_params['t_rise_ns']}_ph_{cr_pulse_params['phase_rad']}_n_levels_{n_levels}"
     exp = perform_cr_len_sweep( 
                                 q_pair = [1,2],
-                                len_list = np.arange(0, 2000, 5),
+                                len_list = np.arange(80, 90, 1),
                                 cr_pulse_params=cr_pulse_params,
-                                echoed_cr = False,
+                                echoed_cr = True,
                                 parallel = True,
                                 max_workers=4,
                                 n_sub=2,
-                                n_levels = 2
+                                n_levels = n_levels,
+                                save_bloch_trajectory=True,
+                                bloch_trajectory_gif_filename=f"cr_len_sweep_bloch_trajectory_{file_suffix}.gif",
+                                bloch_trajectory_png_filename=f"cr_len_sweep_bloch_trajectory_{file_suffix}.png",
+                                plot_filename=f"cr_len_sweep_fit_{file_suffix}.png",
+                                bloch_view_elev=22,
+                                bloch_view_azim=-10, # rotate around Z (try -80, -30, 0, 30, …)
                                 )
 
