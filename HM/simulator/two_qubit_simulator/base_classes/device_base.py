@@ -17,7 +17,7 @@ add their own pulse parameters and sweep logic.
 """
 
 from dataclasses import dataclass, field
-
+from termcolor import cprint
 import numpy as np
 
 from Configuration_Files.config_dictionaries import *
@@ -119,8 +119,11 @@ class TwoQubitSimulatorBase:
 
     def build_qubits(self, q_pair):
         DELTA_QQ_MHZ = self.delta_qq_MHz(q_pair)
-        ALPHA1_MHZ = anharmonicities[f"{q_pair[0]}"]
-        ALPHA2_MHZ = anharmonicities[f"{q_pair[1]}"]
+        ALPHA1_MHZ = -abs(anharmonicities[f"{q_pair[0]}"])
+        ALPHA2_MHZ = -abs(anharmonicities[f"{q_pair[1]}"])
+        cprint(f"ALPHA1_MHZ: {ALPHA1_MHZ}", "green")
+        cprint(f"ALPHA2_MHZ: {ALPHA2_MHZ}", "green")
+        cprint(f"DELTA_QQ_MHZ: {DELTA_QQ_MHZ}", "green")
         return [
             Qubit(anharm_MHz=ALPHA1_MHZ, frame_MHz=0, n_levels=self.n_levels,
                   f_qubit_MHz=fq_vals["fq_vals"][f"{q_pair[0]}"],
