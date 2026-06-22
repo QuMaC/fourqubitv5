@@ -26,11 +26,13 @@ from tqdm import tqdm
 from scipy.optimize import curve_fit
 
 from Configuration_Files.config_dictionaries import *
-from Helper_Functions.helper_functionsv2 import drag_grft_pulse_waveforms, grft_pulse
 from HM.simulator.two_qubit_simulator.base_classes.device_base import TwoQubitSimulatorBase
-from HM.simulator.two_qubit_simulator.engine.pulses import Timeline
-
-AC_AMP_FACTOR = 0.4  # config_builder.py: grft_arr_gen scales every waveform by 0.4
+from HM.simulator.two_qubit_simulator.engine.pulses import (
+    calibrate_f_rabi_per_opx1,
+    cr_rise_fall_flat_top,
+    drag_grft_envelope_mhz,
+    Timeline,
+)
 
 
 class RabiAmpSim(TwoQubitSimulatorBase):
@@ -80,27 +82,24 @@ class RabiAmpSim(TwoQubitSimulatorBase):
 
     # -- pulse construction --------------------------------------------------
     def _calibrate_amp_to_mhz(self):
-        """MHz Rabi rate per unit OPX waveform sample.
-
-        Fixed by the X180 pi-rotation condition: with the engine's drive term
-        H = 2*pi*0.5*(eps a^dag + h.c.), a pi rotation needs
-        integral(eps dt) = 0.5 (MHz*us). The X180 waveform area in OPX*ns is
-        AC_AMP_FACTOR * amp_scale_x180 * sum(grft_pulse), so the scale that maps
-        OPX samples to MHz is 0.5 / (area * 1e-3). Matches calibrate_amp_to_mhz.py.
-        """
+        """MHz Rabi rate per unit OPX waveform sample."""
         p = self.d_x180_params
-        a_grft = float(np.sum(grft_pulse(p["length_ns"], p["rise_ns"])))
-        a_wf_x180 = AC_AMP_FACTOR * p["amp_scale_x180"] * a_grft  # OPX-amp * ns
-        return 0.5 / (a_wf_x180 * 1e-3)
+        return calibrate_f_rabi_per_opx1(
+            p["amp_scale_x180"], p["length_ns"], p["rise_ns"]
+        )
 
     def build_d_x180(self, amp):
         """Complex drive envelope (MHz) for d_X180 at OPX `amp`, one sample per ns."""
         p = self.d_x180_params
-        i_wf, q_wf = drag_grft_pulse_waveforms(
-            amplitude=amp, length=p["length_ns"], rise=p["rise_ns"],
-            anharmonicity=p["anharm_hz"], alpha=p["alpha"], detuning=p["det"],
+        return drag_grft_envelope_mhz(
+            amplitude=amp,
+            length_ns=p["length_ns"],
+            rise_ns=p["rise_ns"],
+            anharm_hz=p["anharm_hz"],
+            alpha=p["alpha"],
+            detuning=p["det"],
+            f_rabi_per_opx1=self.f_rabi_per_opx1,
         )
-        return (np.asarray(i_wf) + 1j * np.asarray(q_wf)) * self.f_rabi_per_opx1
 
     # -- measurement ops -----------------------------------------------------
     def _measure_ops(self):

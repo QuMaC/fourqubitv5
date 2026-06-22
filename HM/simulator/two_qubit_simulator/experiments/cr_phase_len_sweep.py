@@ -301,16 +301,16 @@ if __name__ == "__main__":
         parallel=True,
         max_workers=8,
         n_sub=2,
-        n_levels=2
+        n_levels=3,
     )
-    exp2 = perform_cr_phase_sweep(
-        q_pair=[1, 2],
-        phase_list=np.linspace(0.0, 2 * np.pi, 30),
-        len_list=np.arange(0, 1000, 5),
-        cr_pulse_params=cr_pulse_params,
-        echoed_cr=False,
-        parallel=True,
-        max_workers=8,
-        n_sub=2,
-        n_levels=2
-    )
+    # exp2 = perform_cr_phase_sweep(
+    #     q_pair=[1, 2],
+    #     phase_list=np.linspace(0.0, 2 * np.pi, 30),
+    #     len_list=np.arange(0, 1000, 5),
+    #     cr_pulse_params=cr_pulse_params,
+    #     echoed_cr=False,
+    #     parallel=True,
+    #     max_workers=8,
+    #     n_sub=2,
+    #     n_levels=2,
+    # )

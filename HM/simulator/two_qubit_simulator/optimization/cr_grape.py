@@ -1,0 +1,570 @@
+"""GRAPE-style optimization for echoed CR gates on the two-qubit pulse simulator.
+
+Only the flat-top knobs of one CR half are optimized.  Rise and fall use the lab
+``rise_arr`` / ``fall_arr`` templates, rescaled to meet the first and last knob
+(see ``assemble_cr_half_from_flat_knobs`` in ``engine/pulses.py``).  The echoed
+sequence is ``+u → Xπ → −u → Xπ``.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import time
+from dataclasses import asdict, dataclass, field
+from typing import Any
+
+import matplotlib.pyplot as plt
+import numpy as np
+from scipy.optimize import minimize
+from tqdm import tqdm
+
+from HM.simulator.two_qubit_simulator.engine.pulses import (
+    assemble_cr_half_from_flat_knobs,
+    seed_flat_knobs_from_calibrated_cr,
+)
+from HM.simulator.two_qubit_simulator.experiments.cr_len_sweep import CR_len_sweep
+from HM.simulator.two_qubit_simulator.optimization.fidelity import (
+    average_gate_fidelity,
+    embed_in_full,
+    gate_metrics,
+    leakage_from_comp,
+    process_fidelity,
+    zx_target_unitary,
+)
+
+DEFAULT_CR_PULSE_PARAMS = {
+    "amp_mhz": -32.0,
+    "t_rise_ns": 16,
+    "phase_rad": 2.724,
+}
+
+
+def _default_target_gate(amp_mhz: float) -> str:
+    return "zx_m90" if float(amp_mhz) < 0 else "zx_90"
+
+
+def _knobs_to_x(flat_knobs: np.ndarray) -> np.ndarray:
+    flat_knobs = np.asarray(flat_knobs, dtype=complex).reshape(-1)
+    return np.column_stack([flat_knobs.real, flat_knobs.imag]).ravel()
+
+
+def _x_to_knobs(x: np.ndarray) -> np.ndarray:
+    x = np.asarray(x, dtype=float).reshape(-1)
+    if x.size % 2:
+        raise ValueError("control vector must have even length (I/Q pairs)")
+    pairs = x.reshape(-1, 2)
+    return pairs[:, 0] + 1j * pairs[:, 1]
+
+
+def _to_jsonable(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(k): _to_jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_to_jsonable(v) for v in value]
+    if isinstance(value, np.ndarray):
+        return _to_jsonable(value.tolist())
+    if isinstance(value, np.generic):
+        return value.item()
+    return value
+
+
+def cr_half_duration_ns(flat_len_ns: float, t_rise_ns: float | int) -> float:
+    t_rise = int(round(float(t_rise_ns)))
+    from Helper_Functions.helper_functionsv2 import fall_arr, rise_arr
+
+    n_rise = len(rise_arr(t_rise))
+    n_fall = len(fall_arr(t_rise))
+    return float(n_rise + flat_len_ns + n_fall)
+
+
+def echoed_gate_duration_ns(
+    flat_len_ns: float,
+    t_rise_ns: float | int,
+    x_pi_len_ns: float,
+) -> float:
+    return float(2 * cr_half_duration_ns(flat_len_ns, t_rise_ns) + 2 * x_pi_len_ns)
+
+
+@dataclass
+class CRGrapeConfig:
+    """User-facing GRAPE configuration."""
+
+    flat_len_ns: float = 184.0
+    n_flat_knobs: int = 46
+    seed_amp_mhz: float = -32.0
+    seed_phase_rad: float = 2.724
+    t_rise_ns: int = 16
+    target_gate: str | None = None
+    amp_bound_mhz: float = 48.0
+    leakage_weight: float = 0.0
+    maxiter: int = 80
+    qubit_pair: list[int] = field(default_factory=lambda: [1, 2])
+    n_levels: int = 3
+    optimize: bool = True
+    log_every_eval: bool = False
+    show_progress: bool = True
+    results_dir: str | None = None
+
+    def resolved_target_gate(self) -> str:
+        if self.target_gate is not None:
+            return str(self.target_gate)
+        return _default_target_gate(self.seed_amp_mhz)
+
+
+@dataclass
+class GrapeResult:
+    """Outcome of a GRAPE run."""
+
+    config: CRGrapeConfig
+    flat_knobs_seed: np.ndarray
+    flat_knobs_opt: np.ndarray
+    cr_half_seed: np.ndarray
+    cr_half_opt: np.ndarray
+    half_slices: dict[str, tuple[int, int]]
+    seed_metrics: dict
+    final_metrics: dict
+    history: list[dict]
+    eval_history: list[dict]
+    scipy_result: Any = None
+    exp: CR_len_sweep | None = None
+
+    @property
+    def total_echoed_duration_ns(self) -> float:
+        assert self.exp is not None
+        x_pi_len = self.exp.x_pi_pulse_params["length_ns"]
+        return echoed_gate_duration_ns(
+            self.config.flat_len_ns,
+            self.config.t_rise_ns,
+            x_pi_len,
+        )
+
+    def save(self, directory: str | None = None) -> dict[str, str]:
+        directory = directory or self.config.results_dir or _default_results_dir()
+        os.makedirs(directory, exist_ok=True)
+
+        json_path = os.path.join(directory, "cr_grape_result.json")
+        npz_path = os.path.join(directory, "cr_grape_pulse.npz")
+        conv_png = os.path.join(directory, "cr_grape_convergence.png")
+        wf_png = os.path.join(directory, "cr_grape_waveform.png")
+
+        dt = self.exp.dt_sample_ns if self.exp else 1.0
+        t_half = np.arange(len(self.cr_half_opt), dtype=float) * dt
+
+        payload = _to_jsonable(
+            {
+                "config": asdict(self.config),
+                "total_echoed_duration_ns": self.total_echoed_duration_ns,
+                "half_slices": {
+                    k: {"start": v[0], "stop": v[1]} for k, v in self.half_slices.items()
+                },
+                "seed_metrics": self.seed_metrics,
+                "final_metrics": self.final_metrics,
+                "history": self.history,
+                "eval_history": self.eval_history if self.config.log_every_eval else None,
+            }
+        )
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+
+        np.savez(
+            npz_path,
+            t_ns=t_half,
+            flat_knobs_seed=self.flat_knobs_seed,
+            flat_knobs_opt=self.flat_knobs_opt,
+            cr_half_seed_I=self.cr_half_seed.real,
+            cr_half_seed_Q=self.cr_half_seed.imag,
+            cr_half_opt_I=self.cr_half_opt.real,
+            cr_half_opt_Q=self.cr_half_opt.imag,
+            rise_start=self.half_slices["rise"][0],
+            flat_start=self.half_slices["flat"][0],
+            flat_stop=self.half_slices["flat"][1],
+            fall_start=self.half_slices["fall"][0],
+        )
+
+        self.plot_convergence(conv_png)
+        self.plot_waveform(wf_png)
+
+        paths = {
+            "json": json_path,
+            "npz": npz_path,
+            "convergence_png": conv_png,
+            "waveform_png": wf_png,
+        }
+        for p in paths.values():
+            print(f"Saved {p}")
+        return paths
+
+    def plot_convergence(self, out_png: str) -> None:
+        if not self.history:
+            return
+        iters = [h["iteration"] for h in self.history]
+        f_proc = [h["process_fidelity"] for h in self.history]
+        leakage = [h["leakage"] for h in self.history]
+
+        fig, axes = plt.subplots(2, 1, figsize=(8, 6), sharex=True)
+        axes[0].plot(iters, f_proc, "o-", ms=4, lw=1.2, color="tab:cyan")
+        axes[0].axhline(self.seed_metrics["process_fidelity"], color="0.5", ls="--", lw=1,
+                        label=f"seed F={self.seed_metrics['process_fidelity']:.4f}")
+        axes[0].set_ylabel("process F")
+        axes[0].set_ylim(0, 1.02)
+        axes[0].grid(alpha=0.35)
+        axes[0].legend(fontsize=8)
+
+        axes[1].plot(iters, leakage, "o-", ms=4, lw=1.2, color="tab:red")
+        axes[1].set_xlabel("optimizer iteration")
+        axes[1].set_ylabel("leakage")
+        axes[1].grid(alpha=0.35)
+
+        gate = self.config.resolved_target_gate()
+        axes[0].set_title(
+            f"GRAPE convergence  |  target={gate}  |  flat={self.config.flat_len_ns:.0f} ns  "
+            f"|  knobs={self.config.n_flat_knobs}"
+        )
+        plt.tight_layout()
+        plt.savefig(out_png, dpi=160)
+        plt.close(fig)
+
+    def plot_waveform(self, out_png: str) -> None:
+        dt = self.exp.dt_sample_ns if self.exp else 1.0
+        t = np.arange(len(self.cr_half_opt), dtype=float) * dt
+        rs, re = self.half_slices["rise"]
+        fs, fe = self.half_slices["flat"]
+        ds, de = self.half_slices["fall"]
+
+        fig, axes = plt.subplots(2, 1, figsize=(10, 6), sharex=True)
+        for ax, key in zip(axes, ("I", "Q")):
+            seed_y = self.cr_half_seed.real if key == "I" else self.cr_half_seed.imag
+            opt_y = self.cr_half_opt.real if key == "I" else self.cr_half_opt.imag
+            ax.plot(t, seed_y, color="0.65", lw=1.2, ls="--", label=f"seed {key} (MHz)")
+            ax.plot(t, opt_y, color="tab:green", lw=1.6, label=f"opt {key} (MHz)")
+            ax.axvspan(t[rs], t[re - 1] if re > rs else t[rs], color="tab:blue", alpha=0.08)
+            ax.axvspan(t[fs], t[fe - 1] if fe > fs else t[fs], color="tab:orange", alpha=0.08)
+            ax.axvspan(t[ds], t[de - 1] if de > ds else t[ds], color="tab:purple", alpha=0.08)
+            ax.set_ylabel(f"{key} (MHz)")
+            ax.grid(alpha=0.35)
+            ax.legend(fontsize=8, loc="upper right")
+
+        axes[1].set_xlabel("time within one CR half (ns)")
+        axes[0].set_title("CR half envelope: seed vs optimized (shaded: rise / flat / fall)")
+        fig.text(0.99, 0.01, "blue=rise  orange=flat  purple=fall", ha="right", va="bottom",
+                 fontsize=8, color="0.35")
+        plt.tight_layout()
+        plt.savefig(out_png, dpi=160)
+        plt.close(fig)
+
+
+def _default_results_dir() -> str:
+    return os.path.join(
+        os.path.dirname(__file__), "optimization_tests", "results"
+    )
+
+
+def _build_default_exp(config: CRGrapeConfig) -> CR_len_sweep:
+    cr_pulse_params = {
+        **DEFAULT_CR_PULSE_PARAMS,
+        "amp_mhz": config.seed_amp_mhz,
+        "phase_rad": config.seed_phase_rad,
+        "t_rise_ns": config.t_rise_ns,
+    }
+    return CR_len_sweep(
+        qubit_pair=list(config.qubit_pair),
+        echoed_cr=True,
+        n_levels=config.n_levels,
+        cr_pulse_params=cr_pulse_params,
+    )
+
+
+class CRGrapeOptimizer:
+    """Optimize flat-top CR knobs against process fidelity."""
+
+    def __init__(
+        self,
+        config: CRGrapeConfig,
+        exp: CR_len_sweep | None = None,
+    ):
+        self.config = config
+        self.exp = exp or _build_default_exp(config)
+        if not self.exp.echoed_cr:
+            raise ValueError("CRGrapeOptimizer requires echoed_cr=True")
+
+        self.flat_knobs_seed = seed_flat_knobs_from_calibrated_cr(
+            n_flat_knobs=config.n_flat_knobs,
+            flat_len_ns=config.flat_len_ns,
+            amp_mhz=config.seed_amp_mhz,
+            phase_rad=config.seed_phase_rad,
+            t_rise_ns=config.t_rise_ns,
+            dt_ns=self.exp.dt_sample_ns,
+        )
+        self.cr_half_seed, self.half_slices = assemble_cr_half_from_flat_knobs(
+            self.flat_knobs_seed,
+            flat_len_ns=config.flat_len_ns,
+            t_rise_ns=config.t_rise_ns,
+            dt_ns=self.exp.dt_sample_ns,
+        )
+        self._x_pi = self.exp.build_x_pi()
+
+        if config.target_gate is not None:
+            self.target_gate = str(config.target_gate)
+        else:
+            u_seed = self.propagate(self.flat_knobs_seed)
+            self.target_gate = str(gate_metrics(u_seed, gate="best_zx")["zx_gate"])
+
+        dim = self.exp.simulator.dim
+        u_target_comp = zx_target_unitary(self.target_gate)
+        self.u_target_full = embed_in_full(
+            u_target_comp, dim=dim, comp_indices=self.exp.simulator.comp_idx
+        )
+        self.u_target_comp = u_target_comp
+
+        self.history: list[dict] = []
+        self.eval_history: list[dict] = []
+        self._iteration = 0
+        self._last_eval_metrics: dict | None = None
+        self._pbar: tqdm | None = None
+        self._n_reals = 2 * config.n_flat_knobs
+        self._eval_at_iter_start = 0
+
+    def assemble_half(self, flat_knobs: np.ndarray) -> np.ndarray:
+        wf, slices = assemble_cr_half_from_flat_knobs(
+            flat_knobs,
+            flat_len_ns=self.config.flat_len_ns,
+            t_rise_ns=self.config.t_rise_ns,
+            dt_ns=self.exp.dt_sample_ns,
+        )
+        if slices != self.half_slices:
+            self.half_slices = slices
+        return wf
+
+    def propagate(self, flat_knobs: np.ndarray) -> np.ndarray:
+        cr_plus = self.assemble_half(flat_knobs)
+        timeline = self.exp._build_timeline_from_cr_half(cr_plus, x_pi=self._x_pi)
+        return self.exp._propagator_from_timeline(timeline)
+
+    def metrics(self, U: np.ndarray) -> dict:
+        m = gate_metrics(U, gate=self.target_gate)
+        m["process_fidelity_zx_90"] = process_fidelity(
+            U,
+            embed_in_full(zx_target_unitary("zx_90"), dim=U.shape[0]),
+        )
+        m["process_fidelity_zx_m90"] = process_fidelity(
+            U,
+            embed_in_full(zx_target_unitary("zx_m90"), dim=U.shape[0]),
+        )
+        return m
+
+    def cost_from_knobs(self, flat_knobs: np.ndarray) -> tuple[float, dict]:
+        t0 = time.perf_counter()
+        U = self.propagate(flat_knobs)
+        f_proc = process_fidelity(U, self.u_target_full)
+        leakage = leakage_from_comp(U)
+        f_avg = average_gate_fidelity(U, self.u_target_comp)
+        cost = -(f_proc - self.config.leakage_weight * leakage)
+        elapsed = time.perf_counter() - t0
+        metrics = {
+            "process_fidelity": float(f_proc),
+            "average_gate_fidelity": float(f_avg),
+            "leakage": float(leakage),
+            "cost": float(cost),
+            "target_gate": self.target_gate,
+            "elapsed_s": float(elapsed),
+            "u_max_mhz": float(np.max(np.abs(flat_knobs))),
+        }
+        m_full = self.metrics(U)
+        metrics["process_fidelity_zx_90"] = float(m_full["process_fidelity_zx_90"])
+        metrics["process_fidelity_zx_m90"] = float(m_full["process_fidelity_zx_m90"])
+        return cost, metrics
+
+    def _cost_x(self, x: np.ndarray) -> float:
+        knobs = _x_to_knobs(x)
+        cost, metrics = self.cost_from_knobs(knobs)
+        metrics["eval"] = len(self.eval_history)
+        self.eval_history.append(metrics)
+        self._last_eval_metrics = metrics
+        if self._pbar is not None:
+            evals_this_iter = len(self.eval_history) - self._eval_at_iter_start
+            if evals_this_iter <= self._n_reals + 1:
+                phase = "gradient"
+            else:
+                phase = "line search"
+            self._pbar.set_description(f"GRAPE iter {self._iteration} [{phase}]")
+            self._pbar.set_postfix(
+                eval_total=len(self.eval_history),
+                eval_iter=evals_this_iter,
+                F=f"{metrics['process_fidelity']:.4f}",
+                sec=f"{metrics['elapsed_s']:.1f}",
+                refresh=True,
+            )
+        elif self.config.log_every_eval:
+            print(
+                f"  eval {metrics['eval']:4d}  F={metrics['process_fidelity']:.5f}  "
+                f"leak={metrics['leakage']:.5f}  cost={cost:.5f}"
+            )
+        return cost
+
+    def _callback(self, x: np.ndarray) -> None:
+        if self._last_eval_metrics is None:
+            return
+        row = {"iteration": self._iteration, **_last_eval_metrics_copy(self._last_eval_metrics)}
+        self.history.append(row)
+        if self._pbar is not None:
+            self._pbar.update(1)
+            self._pbar.set_description(f"GRAPE iter {self._iteration + 1}")
+            self._pbar.set_postfix(
+                F=f"{row['process_fidelity']:.4f}",
+                leak=f"{row['leakage']:.4f}",
+                evals=len(self.eval_history),
+                refresh=True,
+            )
+        else:
+            print(
+                f"iter {self._iteration:3d}  F={row['process_fidelity']:.5f}  "
+                f"F_zx90={row['process_fidelity_zx_90']:.5f}  "
+                f"F_zxm90={row['process_fidelity_zx_m90']:.5f}  "
+                f"leak={row['leakage']:.5f}"
+            )
+        self._iteration += 1
+        self._eval_at_iter_start = len(self.eval_history)
+
+    def evaluate_seed(self) -> dict:
+        _, metrics = self.cost_from_knobs(self.flat_knobs_seed)
+        return metrics
+
+    def run(self) -> GrapeResult:
+        print(f"Target gate: {self.target_gate}  (fixed for entire optimization)")
+        seed_metrics = self.evaluate_seed()
+        print("Seed metrics:")
+        _print_metrics(seed_metrics)
+
+        flat_knobs_opt = self.flat_knobs_seed.copy()
+        scipy_result = None
+
+        if self.config.optimize:
+            x0 = _knobs_to_x(self.flat_knobs_seed)
+            bound = float(self.config.amp_bound_mhz)
+            bounds = [(-bound, bound)] * x0.size
+            print(
+                f"\nStarting L-BFGS-B: {self.config.n_flat_knobs} flat knobs "
+                f"({x0.size} reals), maxiter={self.config.maxiter}"
+            )
+            print(
+                f"  Each scipy iter ≈ {self._n_reals + 1}+ evals "
+                f"(~{self._n_reals + 1} for finite-diff gradient, then line search). "
+                f"Iter 0 can take many minutes — watch eval_iter in the bar."
+            )
+            self._eval_at_iter_start = len(self.eval_history)
+            if self.config.show_progress:
+                self._pbar = tqdm(
+                    total=self.config.maxiter,
+                    desc="GRAPE",
+                    unit="iter",
+                    dynamic_ncols=True,
+                )
+            try:
+                scipy_result = minimize(
+                    self._cost_x,
+                    x0,
+                    method="L-BFGS-B",
+                    bounds=bounds,
+                    callback=self._callback,
+                    options={"maxiter": self.config.maxiter, "ftol": 1e-10},
+                )
+            finally:
+                if self._pbar is not None:
+                    self._pbar.close()
+                    self._pbar = None
+            flat_knobs_opt = _x_to_knobs(scipy_result.x)
+            print(f"\nOptimizer message: {scipy_result.message}")
+        else:
+            print("\noptimize=False: seed metrics only (no L-BFGS-B).")
+
+        _, final_metrics = self.cost_from_knobs(flat_knobs_opt)
+        cr_half_opt = self.assemble_half(flat_knobs_opt)
+
+        print("\nFinal metrics:")
+        _print_metrics(final_metrics)
+
+        return GrapeResult(
+            config=self.config,
+            flat_knobs_seed=self.flat_knobs_seed.copy(),
+            flat_knobs_opt=flat_knobs_opt,
+            cr_half_seed=self.cr_half_seed.copy(),
+            cr_half_opt=cr_half_opt,
+            half_slices=self.half_slices,
+            seed_metrics=seed_metrics,
+            final_metrics=final_metrics,
+            history=list(self.history),
+            eval_history=list(self.eval_history),
+            scipy_result=scipy_result,
+            exp=self.exp,
+        )
+
+
+def _last_eval_metrics_copy(metrics: dict) -> dict:
+    return {k: v for k, v in metrics.items() if k != "eval"}
+
+
+def _print_metrics(m: dict) -> None:
+    print(
+        f"  target={m.get('target_gate', '?')}  "
+        f"F_proc={m['process_fidelity']:.5f}  "
+        f"F_avg={m['average_gate_fidelity']:.5f}  "
+        f"F_zx90={m.get('process_fidelity_zx_90', float('nan')):.5f}  "
+        f"F_zxm90={m.get('process_fidelity_zx_m90', float('nan')):.5f}  "
+        f"leakage={m['leakage']:.5f}"
+    )
+
+
+def optimize_echoed_cr_grape(
+    flat_len_ns: float = 184.0,
+    n_flat_knobs: int = 46,
+    seed_amp_mhz: float = -32.0,
+    seed_phase_rad: float = 2.724,
+    t_rise_ns: int = 16,
+    target_gate: str | None = None,
+    amp_bound_mhz: float = 48.0,
+    leakage_weight: float = 0.0,
+    maxiter: int = 80,
+    qubit_pair: list[int] | None = None,
+    n_levels: int = 3,
+    optimize: bool = True,
+    log_every_eval: bool = False,
+    exp: CR_len_sweep | None = None,
+    results_dir: str | None = None,
+    save: bool = True,
+) -> GrapeResult:
+    """User-facing entry point for echoed CR GRAPE.
+
+    Parameters
+    ----------
+    flat_len_ns
+        Flat-top duration of **one** CR half (|R| min default: 184 ns).
+    n_flat_knobs
+        Number of piecewise-constant complex knobs on the flat top.
+    exp
+        Optional pre-built ``CR_len_sweep`` (custom qubit pair, J, n_levels, …).
+        Default builds the standard Q1–Q2 echoed CR experiment from lab JSONs.
+    optimize
+        If False, evaluate seed fidelity only (Phase 0 check).
+    """
+    config = CRGrapeConfig(
+        flat_len_ns=flat_len_ns,
+        n_flat_knobs=n_flat_knobs,
+        seed_amp_mhz=seed_amp_mhz,
+        seed_phase_rad=seed_phase_rad,
+        t_rise_ns=t_rise_ns,
+        target_gate=target_gate,
+        amp_bound_mhz=amp_bound_mhz,
+        leakage_weight=leakage_weight,
+        maxiter=maxiter,
+        qubit_pair=qubit_pair or [1, 2],
+        n_levels=n_levels,
+        optimize=optimize,
+        log_every_eval=log_every_eval,
+        results_dir=results_dir,
+    )
+    optimizer = CRGrapeOptimizer(config, exp=exp)
+    result = optimizer.run()
+    if save:
+        result.save(config.results_dir)
+    return result

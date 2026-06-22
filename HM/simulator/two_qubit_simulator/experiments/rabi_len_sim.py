@@ -1,4 +1,4 @@
-from HM.simulator.two_qubit_simulator.engine.pulses import gaussian_flat_top
+from HM.simulator.two_qubit_simulator.engine.pulses import cr_rise_fall_flat_top
 from Configuration_Files.config_dictionaries import *
 from HM.simulator.two_qubit_simulator.engine.pulses import Timeline
 from HM.simulator.two_qubit_simulator.base_classes.device_base import TwoQubitSimulatorBase
