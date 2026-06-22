@@ -1,8 +1,41 @@
+"""
+two_q_pulse_sim_dynamiqs.py
+===========================
+Dynamiqs/JAX pulse-level engine for the same two-frame transmon model as
+``two_q_pulse_sim.py``. Evolution is delegated to ``dq.sesolve`` (state) or
+``dq.sepropagator`` (unitary) instead of a hand-rolled sub-step ``expm`` scan.
+
+Hamiltonian structure
+---------------------
+  - Static drift: anharmonicities only (each qubit in its own frame).
+  - Coupling: ``dq.modulated`` carrier phases at the qubit-qubit detuning.
+  - Drives: OPX piecewise-constant envelopes indexed inside ``dq.modulated``
+    callbacks (equivalent to ``dq.pwc`` envelope × ``dq.modulated`` carrier,
+    which dynamiqs does not combine with ``*`` on distinct operators).
+
+Units match the qutip engine: frequencies in MHz, Hamiltonian in angular units
+(2π baked in), evolution time in µs (``t_us = t_ns * 1e-3``).
+
+GPU / batching
+--------------
+Install ``jax[cuda]`` and the same code runs on GPU. ``run_propagator`` uses
+``dq.sepropagator``; batched initial states in ``run_shot`` batch over the
+Schödinger solves. Enable ``jax_enable_x64`` via constructor kwarg for parity
+with double-precision QuTiP runs.
+"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any, Sequence
+
 import dynamiqs as dq
+from dynamiqs import method as dq_method
+import jax
 import jax.numpy as jnp
 import numpy as np
-from typing import TYPE_CHECKING, Sequence
+
 from HM.simulator.two_qubit_simulator.engine.constants import DT_SAMPLE_NS, TWOPI
+
 if TYPE_CHECKING:
     from HM.simulator.two_qubit_simulator.base_classes.device_base import (
         DriveLine,
@@ -10,168 +43,289 @@ if TYPE_CHECKING:
     )
 
 
+class _DynamiqsState:
+    """Thin wrapper so experiment code can call ``state.full()`` like QuTiP."""
+
+    def __init__(self, vec: jnp.ndarray | np.ndarray) -> None:
+        self._vec = np.asarray(jnp.asarray(vec), dtype=complex).reshape(-1, 1)
+
+    def full(self) -> np.ndarray:
+        return self._vec.copy()
+
+
 class TwoQubitPulseSimulatorDynamiqs:
+    """Pulse schedule in, final state out — dynamiqs backend.
 
-    def __init__(self, qubits: Sequence[Qubit],
-                       J_MHz: float,
-                       drive_lines: Sequence[DriveLine],
-                       confusion_matrices: tuple[np.ndarray, np.ndarray],
-                       n_sub: int = 8,
-                       dt_sample_ns: float = DT_SAMPLE_NS):
+    ``run_shot(timeline)``   -> ``_DynamiqsState`` (``.full()`` -> (dim, 1) ndarray)
+    ``run_propagator(...)``  -> unitary as (dim, dim) ndarray
+    ``measure(state)``         -> counts dict + diagnostics
+    """
 
+    def __init__(
+        self,
+        qubits: Sequence[Qubit],
+        J_MHz: float,
+        drive_lines: Sequence[DriveLine],
+        confusion_matrices: tuple[np.ndarray, np.ndarray],
+        n_sub: int = 8,
+        dt_sample_ns: float = DT_SAMPLE_NS,
+        enable_x64: bool = True,
+        progress_meter: bool = False,
+        integrator_tol: float = 1e-9,
+    ):
         assert len(qubits) == 2, "this sim is hard-wired to 2 qubits"
+        if enable_x64:
+            jax.config.update("jax_enable_x64", True)
+
         self.qubits = list(qubits)
         self.J_MHz = J_MHz
         self.drive_lines = {dl.name: dl for dl in drive_lines}
-        self.M1, self.M2 = confusion_matrices  
-        self.n_sub = n_sub
-        self.dt_sample_ns = dt_sample_ns
+        self.M1, self.M2 = confusion_matrices
+        self.n_sub = n_sub  # kept for API parity with the qutip engine; unused here
+        self.dt_sample_ns = float(dt_sample_ns)
+        self.dt_sample_us = self.dt_sample_ns * 1e-3
         self.dims = [q.n_levels for q in qubits]
-        self.dim = self.dims[0]*self.dims[1]
+        self.dim = self.dims[0] * self.dims[1]
         self.delta_qq_MHz = self.qubits[0].frame_MHz - self.qubits[1].frame_MHz
-        self.comp_idx = [0,1, self.dims[1], self.dims[1]+1] # a nice was to build a list of indices for the computational subspace
+        self.comp_idx = [0, 1, self.dims[1], self.dims[1] + 1]
         self.channel_names = list(self.drive_lines.keys())
+        self._sesolve_options = dq.Options(progress_meter=progress_meter)
+        self._seprop_options = dq.Options(
+            progress_meter=progress_meter,
+            save_propagators=False,
+        )
+        self._integrator_method = dq_method.Tsit5(
+            atol=integrator_tol,
+            rtol=integrator_tol,
+        )
         self._build_operators()
 
-
-
     def _build_operators(self) -> None:
-        n0, n1 = self.dims #unpacking the dimensions of qubits 
-
-        #building anhillation operators:
-        a0_local = dq.destroy(n0)
-        a1_local = dq.destroy(n1)
-
-        #building identity operators:
-        I0 = jnp.eye(n0)
-        I1 = jnp.eye(n1)
-
-
-        #Lift to joint space: a0 acts on q0 and a1 acts on q1:
+        n0, n1 = self.dims
+        a0_local, a1_local = dq.destroy(n0), dq.destroy(n1)
+        I0, I1 = jnp.eye(n0), jnp.eye(n1)
 
         a0 = jnp.kron(dq.to_jax(a0_local), I1)
         a1 = jnp.kron(I0, dq.to_jax(a1_local))
         self.a = [a0, a1]
         self.ad = [op.conj().T for op in self.a]
 
-        ## Static drift hamiltionian 
-        H_drift = jnp.zeros((self.dim, self.dim), dtype = complex)
+        H_drift = jnp.zeros((self.dim, self.dim), dtype=complex)
         for q, qb in enumerate(self.qubits):
-            H_drift = H_drift + (TWOPI*0.5*qb.anharm_MHz*
-                                    self.ad[q]@self.ad[q]@self.a[q]@self.a[q])
+            H_drift = H_drift + (
+                TWOPI * 0.5 * qb.anharm_MHz
+                * self.ad[q] @ self.ad[q] @ self.a[q] @ self.a[q]
+            )
+        self.H_drift = dq.asqarray(H_drift)
 
-        self.H_drift = H_drift
+        self.coupling_op = dq.asqarray(self.ad[0] @ self.a[1])
+        self.coupling_op_dag = dq.asqarray(self.a[0] @ self.ad[1])
 
-        ## Coupling operators (used every time)
-        self.coupling_op = self.ad[0]@self.a[1]
-        self.coupling_op_dag = self.a[0]@self.ad[1]
-
-
-    def _hamiltonian_at(self, t_ns:float, envelopes:jnp.ndarray) -> jnp.ndarray:
-        """ Hamiltionian built in angular units (2*pi baked in).
-
-        t_ns : the sub-step midpoint time in ns
-        envelopes: array of complex envelope values at that time shape (n_channels,) JAX array btw
-        """
-
-        H = self.H_drift
-        # We're starting from the static part 
-        # J picks up a phase that oscillates at the qubit-qubit detuning 
-
-        ph = TWOPI*self.delta_qq_MHz*t_ns*1e-3
-        H = H + TWOPI*self.J_MHz*(
-            self.coupling_op*jnp.exp(1j*ph) 
-            +
-            self.coupling_op_dag*jnp.exp(-1j*ph)
-        )
-
-        # Drive terms 
-        # 0.5 *(eps_eff*a^dag + c.c) 
-        # for a self-drive (carrier == frame): detuning is 0, no modulation. 
-        # For the CR drive (carrier == target freq): detuning is not zero obvi 
-        for i, name in enumerate(self.channel_names):
-            dl       = self.drive_lines[name]
-            eps      = envelopes[i]
-            delta    = dl.carrier_MHz - self.qubits[dl.target].frame_MHz
-            eps_eff  = eps*jnp.exp(-1j*TWOPI*delta*t_ns*1e-3)
-            q        = dl.target
-            H = H + TWOPI*0.5*(
-                eps_eff*self.ad[q] + 
-                jnp.conj(eps_eff)*self.a[q]
+        self._drive_ops: dict[str, tuple[dq.QArray, dq.QArray]] = {}
+        for name, dl in self.drive_lines.items():
+            q = dl.target
+            self._drive_ops[name] = (
+                dq.asqarray(TWOPI * 0.5 * self.ad[q]),
+                dq.asqarray(TWOPI * 0.5 * self.a[q]),
             )
 
+    def _validate_timeline(self, timeline: dict[str, np.ndarray]) -> int:
+        names = list(timeline.keys())
+        if not names:
+            raise ValueError("empty timeline")
+        unknown = set(names) - set(self.drive_lines)
+        if unknown:
+            raise KeyError(f"timeline has channels with no DriveLine: {unknown}")
+        L = len(timeline[names[0]])
+        for nm in names:
+            if len(timeline[nm]) != L:
+                raise ValueError("all channels must be the same length")
+        return L
 
+    def _coupling_hamiltonian(self) -> dq.TimeQArray:
+        delta = self.delta_qq_MHz
+        j_scale = TWOPI * self.J_MHz
+        fwd = dq.modulated(
+            lambda t: jnp.exp(1j * TWOPI * delta * t),
+            j_scale * self.coupling_op,
+        )
+        bwd = dq.modulated(
+            lambda t: jnp.exp(-1j * TWOPI * delta * t),
+            j_scale * self.coupling_op_dag,
+        )
+        return fwd + bwd
+
+    def _drive_hamiltonian(
+        self,
+        name: str,
+        eps_arr: jnp.ndarray,
+        discontinuity_ts: jnp.ndarray,
+    ) -> dq.TimeQArray:
+        dl = self.drive_lines[name]
+        delta = dl.carrier_MHz - self.qubits[dl.target].frame_MHz
+        ad_op, a_op = self._drive_ops[name]
+        n_eps = eps_arr.shape[0]
+        dt_us = self.dt_sample_us
+
+        def sample_index(t: float) -> jnp.ndarray:
+            return jnp.minimum(jnp.int32(t / dt_us), n_eps - 1)
+
+        def coeff_ad(t: float) -> jnp.ndarray:
+            eps = eps_arr[sample_index(t)]
+            return eps * jnp.exp(-1j * TWOPI * delta * t)
+
+        def coeff_a(t: float) -> jnp.ndarray:
+            eps = eps_arr[sample_index(t)]
+            return jnp.conj(eps) * jnp.exp(1j * TWOPI * delta * t)
+
+        ad_term = dq.modulated(
+            coeff_ad,
+            ad_op,
+            discontinuity_ts=discontinuity_ts,
+        )
+        a_term = dq.modulated(
+            coeff_a,
+            a_op,
+            discontinuity_ts=discontinuity_ts,
+        )
+        return ad_term + a_term
+
+    def _build_hamiltonian(self, timeline: dict[str, np.ndarray]) -> dq.TimeQArray:
+        L = self._validate_timeline(timeline)
+        discontinuity_ts = jnp.linspace(0.0, L * self.dt_sample_us, L + 1)
+
+        H = self.H_drift + self._coupling_hamiltonian()
+        for name in self.channel_names:
+            if name not in timeline:
+                continue
+            eps_arr = jnp.array(timeline[name], dtype=complex)
+            if jnp.all(eps_arr == 0):
+                continue
+            H = H + self._drive_hamiltonian(name, eps_arr, discontinuity_ts)
         return H
-    
 
-    def run_shot(self, 
-                timeline: dict[str, np.ndarray],
-                psi0 =None,
-                store_trajectory: bool = False
-                ):
-                """Evolve a state through one full pulse timeline.
+    def _initial_state(self, psi0: Any | None) -> dq.QArray:
+        if psi0 is None:
+            return dq.basis(self.dim, 0)
+        if hasattr(psi0, "full"):
+            vec = np.asarray(psi0.full(), dtype=complex).reshape(self.dim, 1)
+        else:
+            vec = np.asarray(psi0, dtype=complex).reshape(self.dim, 1)
+        return dq.asqarray(jnp.array(vec))
 
-                Internally pre computes all substep midpoint times and runs a single jax.lan.scan over all L*n_sub substeps, 
-                making the evolution JIT-compilable and differentiable end to end for GRAPE etc. 
+    def _wrap_state(self, state: dq.QArray | jnp.ndarray) -> _DynamiqsState:
+        if hasattr(state, "to_jax"):
+            vec = dq.to_jax(state)
+        else:
+            vec = state
+        return _DynamiqsState(vec)
 
+    def run_shot(
+        self,
+        timeline: dict[str, np.ndarray],
+        psi0: Any | None = None,
+        store_trajectory: bool = False,
+    ):
+        """Evolve through one timeline via ``dq.sesolve``.
 
-                returns a JAX array of shape (dim,1).
-                """
+        Returns ``_DynamiqsState`` with ``.full()`` -> (dim, 1) complex ndarray.
+        If ``store_trajectory``, also returns a list of states at each OPX sample
+        boundary (including the initial state), matching the qutip engine.
+        """
+        L = self._validate_timeline(timeline)
+        H = self._build_hamiltonian(timeline)
+        y0 = self._initial_state(psi0)
 
-                import jax
-                unknown = set(timeline.keys()) - set(self.drive_lines)
-                if unknown:
-                    raise KeyError(f"unknown channels: {unknown}")
-                ### the above just checks if all the channels in the timeline are drive lines (not really needed)
+        if store_trajectory:
+            tsave = jnp.arange(L + 1) * self.dt_sample_us
+        else:
+            tsave = jnp.array([0.0, L * self.dt_sample_us])
 
-                # we need to pre-compute all the substep midpoint times and store them in a JAX array
-                L = len(timeline[self.channel_names[0]]) # all channels are of the same length
-                timeline_array = jnp.array(
-                    np.stack([timeline[name] for name in self.channel_names], axis=1), dtype=complex
-                ) #it gives you the sample at every channel at every time step. So lets say you have three channels and time index 3 then element at idx 3 would be a list of the pulse sample at each channel.
+        result = dq.sesolve(
+            H,
+            y0,
+            tsave,
+            method=self._integrator_method,
+            options=self._sesolve_options,
+        )
+        psi_final = self._wrap_state(result.states[-1])
 
-                k = jnp.arange(L) #sample index
-                s = jnp.arange(self.n_sub) #substep index
-                t_mids = (k[:, None] + (s[None, :] +0.5) / self.n_sub) * self.dt_sample_ns
-                t_mids_flat = t_mids.reshape(-1) #basicdally using broadcasting we get the t_mid val for each substep at each sample
+        if store_trajectory:
+            trajectory = [self._wrap_state(s) for s in result.states]
+            return psi_final, trajectory
+        return psi_final
 
+    def run_propagator(self, timeline: dict[str, np.ndarray]) -> np.ndarray:
+        """Full Hilbert-space unitary via ``dq.sepropagator`` (JIT/GPU-friendly)."""
+        L = self._validate_timeline(timeline)
+        H = self._build_hamiltonian(timeline)
+        tsave = jnp.array([0.0, L * self.dt_sample_us])
+        result = dq.sepropagator(
+            H,
+            tsave,
+            method=self._integrator_method,
+            options=self._seprop_options,
+        )
+        return np.asarray(dq.to_jax(result.final_propagator))
 
-                # repeat each envelope value n_sub times to create a matching array for the substep expansion
-                envelopes_flat = jnp.repeat(timeline_array, self.n_sub, axis=0) # timeline array has the shape (L, n_channels) so repeating it n_sub times gives you (L*n_sub, n_channels)
-                                            #what to repeat, how many times, along which axis (2D so it's either 0 or 1) our data is [[val_ch1, val_ch2, val_ch3], [val_ch1, val_ch2, val_ch3], [val_ch1, val_ch2, val_ch3]] so you want to repeat the 0 axis, not the internal 1 axis. 
-                # if shape is (n,m) and we repeat axis 0 then the shape becomes (n*r,m) where r is the number of times we repeat.
-                
-                # timeline_array (L=3 rows):
-                #   row 0: [cr=32.5, q1=0, q2=0]
-                #   row 1: [cr=32.5, q1=0, q2=0]
-                #   row 2: [cr=0,    q1=0, q2=0]
+    def run_shot_batch(
+        self,
+        timeline: dict[str, np.ndarray],
+        psi0_batch: jnp.ndarray | np.ndarray,
+    ) -> np.ndarray:
+        """Evolve a batch of initial states in one ``dq.sesolve`` call.
 
-                # envelopes_flat after repeat (L*n_sub=6 rows):
-                #   row 0: [cr=32.5, q1=0, q2=0]   ← substep 0 of sample 0
-                #   row 1: [cr=32.5, q1=0, q2=0]   ← substep 1 of sample 0
-                #   row 2: [cr=32.5, q1=0, q2=0]   ← substep 0 of sample 1
-                #   row 3: [cr=32.5, q1=0, q2=0]   ← substep 1 of sample 1
-                #   row 4: [cr=0,    q1=0, q2=0]   ← substep 0 of sample 2
-                #   row 5: [cr=0,    q1=0, q2=0]   ← substep 1 of sample 2
-                # now we have a time array and a envelope table that shows the sample at each substep for each channel.
-                if psi0 is None:
-                    psi = jnp.zeros((self.dim, 1), dtype=complex).at[0,0].set(1.0)
-                else:
-                    psi = jnp.array(np.array(psi0).reshape(self.dim,1), dtype=complex)
+        ``psi0_batch`` has shape (n_states, dim) or (n_states, dim, 1).
+        Returns (n_states, dim, 1) complex ndarray.
+        """
+        L = self._validate_timeline(timeline)
+        H = self._build_hamiltonian(timeline)
+        vecs = np.asarray(psi0_batch, dtype=complex)
+        if vecs.ndim == 2:
+            vecs = vecs[:, :, np.newaxis]
+        y0 = dq.asqarray(jnp.array(vecs))
+        tsave = jnp.array([0.0, L * self.dt_sample_us])
+        result = dq.sesolve(
+            H,
+            y0,
+            tsave,
+            method=self._integrator_method,
+            options=self._sesolve_options,
+        )
+        return np.asarray(dq.to_jax(result.states[:, -1]))
 
-                dt_sub_us = (self.dt_sample_ns / self.n_sub) * 1e-3
+    def measure(
+        self,
+        psi: _DynamiqsState | Any,
+        n_shots: int = 8192,
+        apply_confusion: bool = True,
+        rng: np.random.Generator | None = None,
+    ) -> tuple[dict[str, int], dict]:
+        """Project to the computational subspace, sample counts (same as qutip engine)."""
+        rng = rng or np.random.default_rng()
+        if isinstance(psi, _DynamiqsState):
+            vec = psi.full().flatten()
+        elif hasattr(psi, "full"):
+            vec = np.asarray(psi.full()).flatten()
+        else:
+            vec = np.asarray(psi, dtype=complex).flatten()
 
+        amps = vec[self.comp_idx]
+        p_comp = np.abs(amps) ** 2
+        leakage = 1.0 - p_comp.sum()
+        p = p_comp / p_comp.sum()
 
-                def step(psi, x):
-                    t_ns, envelope_row = x
-                    H = self._hamiltonian_at(t_ns, envelope_row)
-                    psi_next = dq.expm(-1j*H*dt_sub_us)@psi
-                    return psi_next, psi_next
+        if apply_confusion:
+            p = np.kron(self.M1, self.M2) @ p
 
-
-                psi_final, all_states = jax.lax.scan(step,psi, (t_mids_flat, envelopes_flat))
-
-
-                if store_trajectory:
-                    return psi_final, all_states
-                return psi_final
+        p = np.clip(p, 0.0, None)
+        p /= p.sum()
+        draws = rng.choice(4, size=n_shots, p=p)
+        labels = ["00", "01", "10", "11"]
+        counts = {lab: int(np.sum(draws == i)) for i, lab in enumerate(labels)}
+        info = {
+            "leakage": float(leakage),
+            "probs_ideal": p_comp,
+            "probs_measured": p,
+        }
+        return counts, info
