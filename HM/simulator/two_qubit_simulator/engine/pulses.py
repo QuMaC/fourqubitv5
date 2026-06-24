@@ -266,6 +266,90 @@ def apply_virtual_z(waveform: np.ndarray, phase_rad: float) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
+# Arbitrary waveform loading (from .npz files, e.g. GRAPE-optimized pulses)
+# ---------------------------------------------------------------------------
+# (I_key, Q_key) pairs tried in order when auto-detecting a complex envelope
+# stored as separate real/imag arrays. The first pair matches the GRAPE dump
+# written by optimization/cr_grape.py (``cr_half_opt_I`` / ``cr_half_opt_Q``).
+_NPZ_IQ_KEY_PAIRS = (
+    ("cr_half_opt_I", "cr_half_opt_Q"),
+    ("cr_half_seed_I", "cr_half_seed_Q"),
+    ("I", "Q"),
+    ("i_wf", "q_wf"),
+    ("wf_I", "wf_Q"),
+)
+# Single-array keys tried in order when the envelope is stored as one complex
+# (or real) array rather than separate I/Q parts.
+_NPZ_COMPLEX_KEYS = (
+    "waveform",
+    "wf",
+    "envelope",
+    "cr_half_opt",
+    "cr_half",
+    "pulse",
+)
+
+
+def load_waveform_npz(
+    path: str,
+    *,
+    key: str | None = None,
+    i_key: str | None = None,
+    q_key: str | None = None,
+) -> np.ndarray:
+    """Load a complex envelope (eps = I + iQ, in MHz / Rabi-rate units) from an
+    ``.npz`` file.
+
+    The envelope is returned on whatever sample grid it was saved on; it is the
+    caller's job to make sure that grid matches the timeline ``dt_ns`` (the
+    GRAPE dumps are written on a 1 ns grid).
+
+    Key resolution order:
+      1. explicit ``key`` -- a single (complex or real) array,
+      2. explicit ``i_key`` + ``q_key`` -- real and imaginary parts,
+      3. auto-detected I/Q pairs (e.g. the GRAPE ``cr_half_opt_I/Q``),
+      4. auto-detected single complex/real array (e.g. ``waveform``).
+    """
+    with np.load(path, allow_pickle=False) as data:
+        available = set(data.files)
+
+        if key is not None:
+            if key not in available:
+                raise KeyError(
+                    f"key {key!r} not found in {path}; available: {sorted(available)}"
+                )
+            return np.asarray(data[key], dtype=complex).reshape(-1)
+
+        if i_key is not None or q_key is not None:
+            if i_key is None or q_key is None:
+                raise ValueError("provide both i_key and q_key, or neither")
+            missing = {k for k in (i_key, q_key) if k not in available}
+            if missing:
+                raise KeyError(
+                    f"keys {sorted(missing)} not found in {path}; "
+                    f"available: {sorted(available)}"
+                )
+            real = np.asarray(data[i_key], dtype=float).reshape(-1)
+            imag = np.asarray(data[q_key], dtype=float).reshape(-1)
+            return real + 1j * imag
+
+        for ik, qk in _NPZ_IQ_KEY_PAIRS:
+            if ik in available and qk in available:
+                real = np.asarray(data[ik], dtype=float).reshape(-1)
+                imag = np.asarray(data[qk], dtype=float).reshape(-1)
+                return real + 1j * imag
+
+        for ck in _NPZ_COMPLEX_KEYS:
+            if ck in available:
+                return np.asarray(data[ck], dtype=complex).reshape(-1)
+
+    raise KeyError(
+        f"could not auto-detect a waveform in {path}; available keys: "
+        f"{sorted(available)}. Pass key=, or i_key= and q_key=, explicitly."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Timeline builder
 # ---------------------------------------------------------------------------
 class Timeline:
@@ -295,6 +379,25 @@ class Timeline:
         self._grow(channel, end)
         self._buf[channel][start:end] += wf
         return end * self.dt_ns
+
+    def add_arb(self, channel: str, npz_path: str, start_ns: float = 0.0, *,
+                key: str | None = None,
+                i_key: str | None = None,
+                q_key: str | None = None,
+                amp_scale: float = 1.0,
+                phase_rad: float = 0.0) -> float:
+        """Load an arbitrary complex envelope from an ``.npz`` file and place it
+        on `channel` starting at `start_ns` (the "arb pulse" command).
+
+        The loaded envelope (eps = I + iQ, in MHz) is optionally rescaled and
+        phase-shifted: ``eps -> amp_scale * exp(i*phase_rad) * eps``. The npz
+        must be on the same sample grid as this timeline's ``dt_ns`` (the GRAPE
+        dumps are 1 ns/sample). See ``load_waveform_npz`` for key resolution.
+        Returns the end time in ns (handy for back-to-back scheduling)."""
+        wf = load_waveform_npz(npz_path, key=key, i_key=i_key, q_key=q_key)
+        if amp_scale != 1.0 or phase_rad != 0.0:
+            wf = wf * (float(amp_scale) * np.exp(1j * float(phase_rad)))
+        return self.add(channel, start_ns, wf)
 
     def finalize(self) -> dict[str, np.ndarray]:
         """Zero-pad every channel to the common length and return the dict."""
