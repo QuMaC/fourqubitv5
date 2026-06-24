@@ -67,21 +67,34 @@ def comp_projector(
     dim: int,
     comp_indices: list[int] | None = None,
 ) -> np.ndarray:
-
-
+    """Projector onto the computational subspace."""
     comp_indices = comp_indices or DEFAULT_COMP_INDICES
-    P = np.zeros((dim, dim), dtype = complex)
+    P = np.zeros((dim, dim), dtype=complex)
     for idx in comp_indices:
         P[idx, idx] = 1.0
-
     return P
 
 def comp_block(
     U_full: np.ndarray,
     comp_indices: list[int] | None = None,
 ) -> np.ndarray:
-    comp_indices = comp_indices or DEFAULT_COMP_INDICES
+    """
+    Extracts the computational subspace block from the full unitary matrix.
 
+    Given a full unitary matrix U_full and a list of indices specifying the computational
+    subspace (comp_indices), this function returns the square submatrix corresponding to 
+    those indices (i.e., the block acting on the computational subspace).
+
+    Args:
+        U_full (np.ndarray): The full unitary (or propagator) matrix, assumed to be square.
+        comp_indices (list[int] | None): Indices specifying the computational subspace.
+            If None, uses DEFAULT_COMP_INDICES.
+
+    Returns:
+        np.ndarray: The computational subspace block of U_full, with shape 
+        (len(comp_indices), len(comp_indices)).
+    """
+    comp_indices = comp_indices or DEFAULT_COMP_INDICES
     return U_full[np.ix_(comp_indices, comp_indices)]
 
 def process_fidelity(
