@@ -17,59 +17,25 @@ from tqdm import tqdm
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.ticker import FormatStrFormatter
-from matplotlib.animation import FuncAnimation, PillowWriter
 
-_CTRL_COLORS = {0: "tab:blue", 1: "tab:red"}
-_CTRL_LABELS = {0: "Control off (|0⟩)", 1: "Control on (|1⟩)"}
-
-# All generated figures / JSON dumps land here (two_qubit_simulator/sim_media).
-MEDIA_DIR = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "sim_media"
+# All shared plotting (Bloch spheres, colour conventions, trajectory figures)
+# now lives in plotting.py. Imported names are re-aliased to their historical
+# underscore-prefixed spellings so existing importers keep working.
+from HM.simulator.two_qubit_simulator.experiments import plotting
+from HM.simulator.two_qubit_simulator.experiments.plotting import (
+    CTRL_COLORS,
+    CTRL_LABELS,
+    MEDIA_DIR,
+    _media_path,
+    bloch_trajectory_arrays,
+    draw_bloch_sphere,
+    plot_bloch_path,
 )
 
-
-def _media_path(filename):
-    """Place a bare filename under MEDIA_DIR; leave paths with a directory as-is."""
-    if os.path.dirname(filename):
-        return filename
-    return os.path.join(MEDIA_DIR, filename)
-
-
-def _draw_bloch_sphere(ax, wireframe_alpha=0.18, elev=22, azim=-58):
-    """Unit Bloch sphere wireframe and axis arrows on a 3D axes.
-
-    Matplotlib ``view_init`` angles (degrees): ``elev`` tilts the camera;
-    ``azim`` rotates about the Bloch Z axis.
-    """
-    u = np.linspace(0, 2 * np.pi, 36)
-    v = np.linspace(0, np.pi, 18)
-    x = np.outer(np.cos(u), np.sin(v))
-    y = np.outer(np.sin(u), np.sin(v))
-    z = np.outer(np.ones_like(u), np.cos(v))
-    ax.plot_wireframe(x, y, z, color="0.65", alpha=wireframe_alpha, linewidth=0.4, rstride=2, cstride=2)
-    for vec, label in zip(
-        [(1, 0, 0), (0, 1, 0), (0, 0, 1)],
-        ["X", "Y", "Z"],
-    ):
-        ax.quiver(0, 0, 0, *vec, color="0.35", arrow_length_ratio=0.08, linewidth=0.9, alpha=0.85)
-        ax.text(*(1.12 * np.asarray(vec)), label, color="0.35", fontsize=8)
-    ax.set_xlim(-1.05, 1.05)
-    ax.set_ylim(-1.05, 1.05)
-    ax.set_zlim(-1.05, 1.05)
-    ax.set_box_aspect((1, 1, 1))
-    ax.view_init(elev=elev, azim=azim)
-    ax.set_axis_off()
-
-
-def _plot_bloch_path(ax, xs, ys, zs, color, up_to=None, show_markers=True):
-    """Plot a Bloch trajectory up to index up_to (inclusive)."""
-    n = len(xs) if up_to is None else min(up_to + 1, len(xs))
-    if n == 0:
-        return
-    ax.plot(xs[:n], ys[:n], zs[:n], color=color, lw=2.0, alpha=0.9)
-    if show_markers and n > 0:
-        ax.scatter(xs[0], ys[0], zs[0], color=color, s=28, marker="o", alpha=0.55, label="start")
-        ax.scatter(xs[n - 1], ys[n - 1], zs[n - 1], color=color, s=42, marker="*", label="current")
+_CTRL_COLORS = CTRL_COLORS
+_CTRL_LABELS = CTRL_LABELS
+_draw_bloch_sphere = draw_bloch_sphere
+_plot_bloch_path = plot_bloch_path
 
 # Computational-subspace indices |00>,|01>,|10>,|11> in the qutrit tensor product.
 _COMP_INDICES = [0, 1, 3, 4]
@@ -639,14 +605,7 @@ class CR_len_sweep(TwoQubitSimulatorBase):
 
     def _bloch_trajectory_arrays(self, results):
         """Target-qubit Bloch components (X, Y, Z) for each control state."""
-        trajectories = {}
-        for ctrl in (0, 1):
-            trajectories[ctrl] = (
-                np.asarray(results[ctrl]["X"], dtype=float),
-                np.asarray(results[ctrl]["Y"], dtype=float),
-                np.asarray(results[ctrl]["Z"], dtype=float),
-            )
-        return trajectories
+        return bloch_trajectory_arrays(results)
 
     def save_bloch_trajectory_png(self, results=None, tlist=None, filename=None):
         """Save a 2x1 PNG of the full net Bloch trajectories (ctrl off | ctrl on)."""
@@ -654,27 +613,13 @@ class CR_len_sweep(TwoQubitSimulatorBase):
         if tlist is None:
             tlist = np.asarray(results["total_durations"], dtype=float)
         filename = self.bloch_trajectory_png_filename if filename is None else filename
-        trajectories = self._bloch_trajectory_arrays(results)
-
-        fig, axes = plt.subplots(2, 1, figsize=(6, 10), subplot_kw={"projection": "3d"})
-        for ax, ctrl in zip(axes, (0, 1)):
-            xs, ys, zs = trajectories[ctrl]
-            color = _CTRL_COLORS[ctrl]
-            _draw_bloch_sphere(ax, elev=self.bloch_view_elev, azim=self.bloch_view_azim)
-            _plot_bloch_path(ax, xs, ys, zs, color=color, show_markers=False)
-            ax.scatter(xs[0], ys[0], zs[0], color=color, s=36, marker="o", alpha=0.55, label="start")
-            ax.scatter(xs[-1], ys[-1], zs[-1], color=color, s=64, marker="*", label="end")
-            ax.set_title(_CTRL_LABELS[ctrl], color=color, fontsize=11)
-
-        fig.suptitle(
-            f"Target Bloch trajectories vs CR duration (0–{tlist[-1]:.0f} ns)",
-            fontsize=12,
-            y=0.98,
+        return plotting.save_bloch_trajectory_png(
+            bloch_trajectory_arrays(results),
+            tlist,
+            filename,
+            elev=self.bloch_view_elev,
+            azim=self.bloch_view_azim,
         )
-        plt.tight_layout()
-        fig.savefig(filename, dpi=160, bbox_inches="tight")
-        plt.close(fig)
-        print(f"Saved {filename}")
 
     def save_bloch_trajectory_gif(self, results=None, tlist=None, filename=None, fps=None):
         """Save a 2x1 GIF animating the traversed Bloch paths (ctrl off | ctrl on)."""
@@ -683,42 +628,14 @@ class CR_len_sweep(TwoQubitSimulatorBase):
             tlist = np.asarray(results["total_durations"], dtype=float)
         filename = self.bloch_trajectory_gif_filename if filename is None else filename
         fps = self.bloch_gif_fps if fps is None else int(fps)
-        trajectories = self._bloch_trajectory_arrays(results)
-        n_frames = len(tlist)
-
-        fig, axes = plt.subplots(2, 1, figsize=(6, 10), subplot_kw={"projection": "3d"})
-        path_artists = []
-        for ax, ctrl in zip(axes, (0, 1)):
-            _draw_bloch_sphere(ax, elev=self.bloch_view_elev, azim=self.bloch_view_azim)
-            ax.set_title(_CTRL_LABELS[ctrl], color=_CTRL_COLORS[ctrl], fontsize=11)
-            xs, ys, zs = trajectories[ctrl]
-            color = _CTRL_COLORS[ctrl]
-            (line,) = ax.plot([], [], [], color=color, lw=2.0, alpha=0.9)
-            start = ax.scatter([], [], [], color=color, s=36, marker="o", alpha=0.55)
-            current = ax.scatter([], [], [], color=color, s=64, marker="*")
-            duration_text = ax.text2D(0.02, 0.02, "", transform=ax.transAxes, fontsize=9, color=color)
-            path_artists.append((line, start, current, duration_text, xs, ys, zs, color))
-
-        fig.suptitle("Target Bloch trajectories vs CR duration", fontsize=12, y=0.98)
-
-        def _update(frame_idx):
-            artists = []
-            duration_ns = float(tlist[frame_idx])
-            for line, start, current, duration_text, xs, ys, zs, color in path_artists:
-                n = frame_idx + 1
-                line.set_data(xs[:n], ys[:n])
-                line.set_3d_properties(zs[:n])
-                start._offsets3d = ([xs[0]], [ys[0]], [zs[0]])
-                current._offsets3d = ([xs[n - 1]], [ys[n - 1]], [zs[n - 1]])
-                duration_text.set_text(f"t = {duration_ns:.0f} ns")
-                artists.extend([line, start, current, duration_text])
-            return artists
-
-        anim = FuncAnimation(fig, _update, frames=n_frames, interval=1000 / fps, blit=False)
-        writer = PillowWriter(fps=fps)
-        anim.save(filename, writer=writer)
-        plt.close(fig)
-        print(f"Saved {filename} ({n_frames} frames @ {fps} fps)")
+        return plotting.save_bloch_trajectory_gif(
+            bloch_trajectory_arrays(results),
+            tlist,
+            filename,
+            fps=fps,
+            elev=self.bloch_view_elev,
+            azim=self.bloch_view_azim,
+        )
 
     def save_bloch_trajectory_plots(self, results=None, tlist=None):
         """Save both the static PNG and animated GIF of Bloch trajectories."""
@@ -779,7 +696,7 @@ if __name__ == "__main__":
     file_suffix = f"amp_{cr_pulse_params['amp_mhz']}_t_rise_{cr_pulse_params['t_rise_ns']}_ph_{cr_pulse_params['phase_rad']}_n_levels_{n_levels}"
     exp = perform_cr_len_sweep( 
                                 q_pair = [1,2],
-                                len_list = np.arange(80, 90, 1),
+                                len_list = np.arange(0, 280, 5),
                                 cr_pulse_params=cr_pulse_params,
                                 echoed_cr = True,
                                 parallel = True,

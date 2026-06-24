@@ -22,31 +22,25 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime
 
-import matplotlib.pyplot as plt
 import numpy as np
 import qutip as qt
-from matplotlib.animation import FuncAnimation, PillowWriter
-from matplotlib.ticker import FormatStrFormatter
 
-from HM.simulator.two_qubit_simulator.engine.pulses import Timeline
+from HM.simulator.two_qubit_simulator.engine.pulses import Timeline, load_waveform_npz
 from HM.simulator.two_qubit_simulator.experiments.cr_len_sweep import (
     CR_len_sweep,
-    MEDIA_DIR,
-    _CTRL_COLORS,
-    _CTRL_LABELS,
-    _draw_bloch_sphere,
-    _media_path,
-    _plot_bloch_path,
     pauli_on_levels,
 )
-
-_COMP_LABELS = ("|00⟩", "|01⟩", "|10⟩", "|11⟩")
-
-
-def _date_tag() -> str:
-    return datetime.now().strftime("%d%m%Y")
+from HM.simulator.two_qubit_simulator.experiments.plotting import (
+    COMP_LABELS as _COMP_LABELS,
+    MEDIA_DIR,
+    _date_tag,
+    _media_path,
+    plot_populations,
+    plot_xyz,
+    save_bloch_gif,
+    save_bloch_png,
+)
 
 
 def _to_jsonable(value):
@@ -202,201 +196,6 @@ def evolve_timeline(
     return out
 
 
-def _decimate_frame_indices(n_total: int, max_frames: int = 120) -> np.ndarray:
-    """Evenly spaced frame indices, always including first and last."""
-    if n_total <= 0:
-        return np.array([], dtype=int)
-    if max_frames <= 0:
-        raise ValueError(f"max_frames must be positive, got {max_frames}")
-    if n_total <= max_frames:
-        return np.arange(n_total, dtype=int)
-    return np.unique(np.round(np.linspace(0, n_total - 1, max_frames)).astype(int))
-
-
-def plot_populations(results, filename=None, title=None):
-    """Computational- and higher-level populations vs time (ctrl 0 / ctrl 1)."""
-    filename = _media_path(filename or f"cr_pulse_evolution_populations_{_date_tag()}.png")
-    times = results["times_ns"]
-    fig, axes = plt.subplots(2, 1, figsize=(9, 6), sharex=True)
-
-    for ax, ctrl in zip(axes, (0, 1)):
-        data = results[f"control_{ctrl}"]
-        color = _CTRL_COLORS[ctrl]
-        for k, label in enumerate(_COMP_LABELS):
-            ax.plot(times, data["comp_populations"][:, k], lw=1.6,
-                    label=label, alpha=0.95)
-        # Non-computational levels (e.g. |02⟩, |12⟩) when n_levels > 2.
-        extra = []
-        for j, lab in enumerate(data["level_labels"]):
-            if lab not in _COMP_LABELS:
-                extra.append((j, lab))
-        for j, lab in extra:
-            ax.plot(times, data["level_populations"][:, j], lw=1.0,
-                    ls="--", alpha=0.55, label=lab)
-        ax.set_ylabel("Population")
-        ax.set_ylim(-0.02, 1.05)
-        ax.set_title(_CTRL_LABELS[ctrl], color=color, fontsize=10)
-        ax.grid(alpha=0.35)
-        ax.legend(loc="upper right", fontsize=7, ncol=2)
-
-    axes[-1].set_xlabel("Time (ns)")
-    fig.suptitle(title or "Two-qubit state populations during pulse", fontsize=11)
-    plt.tight_layout()
-    fig.savefig(filename, dpi=160, bbox_inches="tight")
-    plt.close(fig)
-    print(f"Saved {filename}")
-    return filename
-
-
-def plot_xyz(results, filename=None, title=None, qubit="both"):
-    """Pauli ⟨X⟩, ⟨Y⟩, ⟨Z⟩ vs time for control and/or target qubit."""
-    filename = _media_path(filename or f"cr_pulse_evolution_xyz_{_date_tag()}.png")
-    times = results["times_ns"]
-    qubits = ("ctrl", "tgt") if qubit == "both" else (qubit,)
-    n_rows = len(qubits)
-    fig, axes = plt.subplots(n_rows, 3, figsize=(10, 3.2 * n_rows), sharex=True)
-    if n_rows == 1:
-        axes = np.asarray([axes])
-
-    qubit_titles = {"ctrl": "Control qubit", "tgt": "Target qubit"}
-    for row, q in enumerate(qubits):
-        for col, comp in enumerate(("X", "Y", "Z")):
-            ax = axes[row, col]
-            key = f"{q}_{comp}"
-            for ctrl in (0, 1):
-                ax.plot(
-                    times,
-                    results[f"control_{ctrl}"][key],
-                    color=_CTRL_COLORS[ctrl],
-                    lw=1.6,
-                    label=_CTRL_LABELS[ctrl],
-                )
-            ax.set_ylabel(f"⟨{comp}⟩")
-            ax.set_ylim(-1.1, 1.1)
-            ax.axhline(0, color="k", lw=0.4, alpha=0.3)
-            ax.yaxis.set_major_formatter(FormatStrFormatter("%.2g"))
-            ax.grid(alpha=0.35)
-            if row == 0:
-                ax.set_title(comp)
-            if col == 0:
-                ax.text(
-                    -0.12, 0.5, qubit_titles[q], transform=ax.transAxes,
-                    rotation=90, va="center", ha="center", fontsize=10,
-                )
-            if row == 0 and col == 2:
-                ax.legend(loc="upper right", fontsize=7)
-
-    axes[-1, 1].set_xlabel("Time (ns)")
-    fig.suptitle(title or "Single-qubit Pauli expectations during pulse", fontsize=11)
-    plt.tight_layout()
-    fig.savefig(filename, dpi=160, bbox_inches="tight")
-    plt.close(fig)
-    print(f"Saved {filename}")
-    return filename
-
-
-def save_bloch_gif(
-    results,
-    filename=None,
-    *,
-    qubit="tgt",
-    fps=12,
-    max_gif_frames=120,
-    title=None,
-):
-    """Animated 2x1 Bloch trajectories (ctrl off | ctrl on) during the pulse."""
-    filename = _media_path(filename or f"cr_pulse_evolution_bloch_{_date_tag()}.gif")
-    times = results["times_ns"]
-    n_total = len(times)
-    frame_indices = _decimate_frame_indices(n_total, max_gif_frames)
-    n_frames = len(frame_indices)
-    prefix = f"{qubit}_"
-
-    trajectories = {}
-    for ctrl in (0, 1):
-        data = results[f"control_{ctrl}"]
-        trajectories[ctrl] = (
-            data[f"{prefix}X"],
-            data[f"{prefix}Y"],
-            data[f"{prefix}Z"],
-        )
-
-    fig, axes = plt.subplots(2, 1, figsize=(6, 10), subplot_kw={"projection": "3d"})
-    path_artists = []
-    for ax, ctrl in zip(axes, (0, 1)):
-        _draw_bloch_sphere(ax)
-        ax.set_title(_CTRL_LABELS[ctrl], color=_CTRL_COLORS[ctrl], fontsize=11)
-        xs, ys, zs = trajectories[ctrl]
-        color = _CTRL_COLORS[ctrl]
-        (line,) = ax.plot([], [], [], color=color, lw=2.0, alpha=0.9)
-        start = ax.scatter([], [], [], color=color, s=36, marker="o", alpha=0.55)
-        current = ax.scatter([], [], [], color=color, s=64, marker="*")
-        time_text = ax.text2D(0.02, 0.02, "", transform=ax.transAxes, fontsize=9, color=color)
-        path_artists.append((line, start, current, time_text, xs, ys, zs))
-
-    qubit_name = "Target" if qubit == "tgt" else "Control"
-    fig.suptitle(
-        title or f"{qubit_name} Bloch trajectories during pulse",
-        fontsize=12, y=0.98,
-    )
-
-    def _update(anim_idx):
-        artists = []
-        data_idx = int(frame_indices[anim_idx])
-        t_ns = float(times[data_idx])
-        for line, start, current, time_text, xs, ys, zs in path_artists:
-            n = data_idx + 1
-            line.set_data(xs[:n], ys[:n])
-            line.set_3d_properties(zs[:n])
-            start._offsets3d = ([xs[0]], [ys[0]], [zs[0]])
-            current._offsets3d = ([xs[data_idx]], [ys[data_idx]], [zs[data_idx]])
-            time_text.set_text(f"t = {t_ns:.1f} ns")
-            artists.extend([line, start, current, time_text])
-        return artists
-
-    anim = FuncAnimation(fig, _update, frames=n_frames, interval=1000 / fps, blit=False)
-    writer = PillowWriter(fps=fps)
-    anim.save(filename, writer=writer)
-    plt.close(fig)
-    if n_frames < n_total:
-        print(
-            f"Saved {filename} ({n_frames} frames @ {fps} fps, "
-            f"decimated from {n_total} time steps)"
-        )
-    else:
-        print(f"Saved {filename} ({n_frames} frames @ {fps} fps)")
-    return filename
-
-
-def save_bloch_png(results, filename=None, qubit="tgt", title=None):
-    """Static 2×1 Bloch trajectories at full pulse duration."""
-    filename = _media_path(filename or f"cr_pulse_evolution_bloch_{_date_tag()}.png")
-    prefix = f"{qubit}_"
-    fig, axes = plt.subplots(2, 1, figsize=(6, 10), subplot_kw={"projection": "3d"})
-    t_end = results["total_duration_ns"]
-
-    for ax, ctrl in zip(axes, (0, 1)):
-        data = results[f"control_{ctrl}"]
-        xs, ys, zs = data[f"{prefix}X"], data[f"{prefix}Y"], data[f"{prefix}Z"]
-        color = _CTRL_COLORS[ctrl]
-        _draw_bloch_sphere(ax)
-        _plot_bloch_path(ax, xs, ys, zs, color=color, show_markers=False)
-        ax.scatter(xs[0], ys[0], zs[0], color=color, s=36, marker="o", alpha=0.55, label="start")
-        ax.scatter(xs[-1], ys[-1], zs[-1], color=color, s=64, marker="*", label="end")
-        ax.set_title(_CTRL_LABELS[ctrl], color=color, fontsize=11)
-
-    qubit_name = "Target" if qubit == "tgt" else "Control"
-    fig.suptitle(
-        title or f"{qubit_name} Bloch trajectories (0–{t_end:.0f} ns)",
-        fontsize=12, y=0.98,
-    )
-    plt.tight_layout()
-    fig.savefig(filename, dpi=160, bbox_inches="tight")
-    plt.close(fig)
-    print(f"Saved {filename}")
-    return filename
-
-
 def save_results_json(results, filename=None, include_state_vector=True):
     """Dump observables (and optionally full state vectors) to JSON."""
     filename = _media_path(filename or f"cr_pulse_evolution_{_date_tag()}.json")
@@ -461,16 +260,52 @@ def plot_and_save_all(
 
 
 class CR_pulse_evolution(CR_len_sweep):
-    """Build a CR (or echoed-CR) timeline and run ``evolve_timeline`` on it."""
+    """Build a CR (or echoed-CR) timeline and run ``evolve_timeline`` on it.
+
+    A timeline can come from three places:
+      * the analytic CR-pulse parameters (``build_timeline``), as before;
+      * an arbitrary waveform loaded from an ``.npz`` file
+        (``build_arb_timeline`` / the ``arb_npz_path`` option), e.g. a
+        GRAPE-optimized pulse from ``optimization/cr_grape.py``;
+      * an explicit ``timeline`` passed to ``run``.
+    """
+
+    # Recognized arb-pulse kwargs popped before delegating to CR_len_sweep.
+    _ARB_KWARGS = (
+        "arb_npz_path",
+        "arb_mode",
+        "arb_channel",
+        "arb_key",
+        "arb_i_key",
+        "arb_q_key",
+        "arb_amp_scale",
+        "arb_phase_rad",
+    )
 
     def __init__(self, qubit_pair=(1, 2), flat_len_ns=None, **kwargs):
         kwargs.setdefault("dt_sample_ns", 1)
         kwargs.setdefault("n_sub", 2)
+        arb_opts = {name: kwargs.pop(name) for name in self._ARB_KWARGS if name in kwargs}
         super().__init__(qubit_pair=qubit_pair, len_list=None, **kwargs)
         self.flat_len_ns = flat_len_ns
         self.bloch_gif_fps = int(kwargs.get("bloch_gif_fps", 12))
         self.max_gif_frames = int(kwargs.get("max_gif_frames", 120))
         self.file_tag = kwargs.get("file_tag", "")
+
+        # Arbitrary-waveform (npz) options.
+        #   arb_mode "echoed_cr_half": treat the npz as one CR half (+u) and
+        #       build the echoed sequence +u -> Xpi -> -u -> Xpi (requires
+        #       echoed_cr=True). This matches how cr_grape.py dumps a pulse.
+        #   arb_mode "single": place the loaded waveform directly on
+        #       ``arb_channel`` as a single arb pulse starting at t=0.
+        self.arb_npz_path = arb_opts.get("arb_npz_path")
+        self.arb_mode = str(arb_opts.get("arb_mode", "echoed_cr_half"))
+        self.arb_channel = str(arb_opts.get("arb_channel", "cr_drive"))
+        self.arb_key = arb_opts.get("arb_key")
+        self.arb_i_key = arb_opts.get("arb_i_key")
+        self.arb_q_key = arb_opts.get("arb_q_key")
+        self.arb_amp_scale = float(arb_opts.get("arb_amp_scale", 1.0))
+        self.arb_phase_rad = float(arb_opts.get("arb_phase_rad", 0.0))
         os.makedirs(MEDIA_DIR, exist_ok=True)
 
     def build_timeline(self, flat_len_ns=None) -> dict[str, np.ndarray]:
@@ -482,6 +317,53 @@ class CR_pulse_evolution(CR_len_sweep):
         x_pi = self.build_x_pi() if self.echoed_cr else None
         return self._build_timeline(float(flat_len_ns), x_pi=x_pi)
 
+    def build_arb_timeline(self, npz_path=None, *, mode=None) -> dict[str, np.ndarray]:
+        """Build a timeline from an arbitrary waveform stored in an ``.npz`` file.
+
+        Parameters
+        ----------
+        npz_path
+            Path to the ``.npz`` waveform (defaults to ``self.arb_npz_path``).
+        mode
+            ``"echoed_cr_half"`` (default) builds the echoed sequence
+            ``+u -> Xpi -> -u -> Xpi`` from the loaded CR half; ``"single"``
+            places the waveform directly on ``self.arb_channel``.
+        """
+        npz_path = npz_path or self.arb_npz_path
+        if npz_path is None:
+            raise ValueError("arb_npz_path must be set (or pass npz_path here)")
+        mode = str(mode or self.arb_mode)
+
+        if mode == "echoed_cr_half":
+            if not self.echoed_cr:
+                raise ValueError("arb_mode='echoed_cr_half' requires echoed_cr=True")
+            cr_half = load_waveform_npz(
+                npz_path, key=self.arb_key, i_key=self.arb_i_key, q_key=self.arb_q_key
+            )
+            if self.arb_amp_scale != 1.0 or self.arb_phase_rad != 0.0:
+                cr_half = cr_half * (
+                    self.arb_amp_scale * np.exp(1j * self.arb_phase_rad)
+                )
+            return self._build_timeline_from_cr_half(cr_half, x_pi=self.build_x_pi())
+
+        if mode == "single":
+            tl = Timeline(self.channels, dt_ns=self.dt_sample_ns)
+            tl.add_arb(
+                self.arb_channel,
+                npz_path,
+                start_ns=0.0,
+                key=self.arb_key,
+                i_key=self.arb_i_key,
+                q_key=self.arb_q_key,
+                amp_scale=self.arb_amp_scale,
+                phase_rad=self.arb_phase_rad,
+            )
+            return tl.finalize()
+
+        raise ValueError(
+            f"unknown arb_mode {mode!r}; expected 'echoed_cr_half' or 'single'"
+        )
+
     def run(
         self,
         timeline: Timeline | dict[str, np.ndarray] | None = None,
@@ -490,14 +372,26 @@ class CR_pulse_evolution(CR_len_sweep):
         plot=True,
         save_json=True,
     ):
-        """Evolve one timeline (built from CR params if ``timeline`` is omitted)."""
+        """Evolve one timeline.
+
+        If ``timeline`` is omitted, the timeline is built from an arb npz
+        waveform when ``arb_npz_path`` is set, otherwise from the CR-pulse
+        parameters.
+        """
+        used_arb = False
         if timeline is None:
-            timeline = self.build_timeline(flat_len_ns=flat_len_ns)
+            if self.arb_npz_path is not None:
+                timeline = self.build_arb_timeline()
+                used_arb = True
+            else:
+                timeline = self.build_timeline(flat_len_ns=flat_len_ns)
         else:
             timeline = finalize_timeline(timeline)
 
+        src = f"arb npz ({self.arb_mode})" if used_arb else "CR params"
         print(f"Timeline duration: {_timeline_length(timeline) * self.dt_sample_ns:.1f} ns"
-              f"  |  dt = {self.dt_sample_ns:g} ns  |  echoed = {self.echoed_cr}")
+              f"  |  dt = {self.dt_sample_ns:g} ns  |  echoed = {self.echoed_cr}"
+              f"  |  source = {src}")
         self.results = evolve_timeline(self.simulator, timeline, dt_sample_ns=self.dt_sample_ns)
         self.results["metadata"] = {
             "q_pair": self.q_pair,
@@ -505,6 +399,13 @@ class CR_pulse_evolution(CR_len_sweep):
             "cr_pulse_params": self.cr_pulse_params,
             "x_pi_pulse_params": self.x_pi_pulse_params,
             "flat_len_ns": flat_len_ns if flat_len_ns is not None else self.flat_len_ns,
+            "arb_pulse": {
+                "npz_path": self.arb_npz_path,
+                "mode": self.arb_mode,
+                "channel": self.arb_channel,
+                "amp_scale": self.arb_amp_scale,
+                "phase_rad": self.arb_phase_rad,
+            } if used_arb else None,
         }
 
         if plot:
@@ -525,24 +426,71 @@ def perform_cr_pulse_evolution(q_pair=(1, 2), flat_len_ns=None, **kwargs):
     return exp
 
 
-if __name__ == "__main__":
-    cr_pulse_params = {
-        "amp_mhz": 32.0,
-        "t_rise_ns": int(16),
-        "phase_rad": 0,
-    }
-    echoed_cr = True
-    n_levels = 3
-    file_tag = (
-        f"amp_{cr_pulse_params['amp_mhz']}_t_rise_{cr_pulse_params['t_rise_ns']}"
-        f"_ph_{cr_pulse_params['phase_rad']}_echoed_cr_{echoed_cr}_n_levels_{n_levels}"
-    )
-    perform_cr_pulse_evolution(
-        q_pair=[1, 2],
-        flat_len_ns=80.0,
-        cr_pulse_params=cr_pulse_params,
+def perform_arb_pulse_evolution(
+    arb_npz_path,
+    q_pair=(1, 2),
+    *,
+    arb_mode="echoed_cr_half",
+    echoed_cr=True,
+    n_levels=3,
+    **kwargs,
+):
+    """One-shot pulse evolution driven by an arbitrary waveform from an npz file.
+
+    Loads ``arb_npz_path`` (e.g. a GRAPE-optimized CR pulse) and evolves it via
+    the same machinery as ``perform_cr_pulse_evolution``. With the default
+    ``arb_mode='echoed_cr_half'`` the npz is treated as one CR half and the
+    echoed sequence ``+u -> Xpi -> -u -> Xpi`` is built around it.
+    """
+    exp = CR_pulse_evolution(
+        qubit_pair=q_pair,
+        arb_npz_path=arb_npz_path,
+        arb_mode=arb_mode,
         echoed_cr=echoed_cr,
         n_levels=n_levels,
-        n_sub=2,
-        file_tag=file_tag,
+        **kwargs,
     )
+    exp.run()
+    return exp
+
+
+if __name__ == "__main__":
+    # Set to a path to evolve a GRAPE-optimized (or any) waveform from an npz
+    # file; leave as None to evolve the analytic CR pulse below.
+    ARB_NPZ_PATH = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "optimization", "optimization_tests", "results", "cr_grape_pulse.npz",
+    )
+    ARB_NPZ_PATH = None
+    if ARB_NPZ_PATH:
+        n_levels = 6
+        perform_arb_pulse_evolution(
+            ARB_NPZ_PATH,
+            q_pair=[1, 2],
+            arb_mode="echoed_cr_half",
+            echoed_cr=True,
+            n_levels=n_levels,
+            n_sub=2,
+            file_tag=f"arb_grape_echoed_cr_n_levels_{n_levels}",
+        )
+    else:
+        cr_pulse_params = {
+            "amp_mhz": 32.0,
+            "t_rise_ns": int(16),
+            "phase_rad": 0,
+        }
+        echoed_cr = False
+        n_levels = 2
+        file_tag = (
+            f"amp_{cr_pulse_params['amp_mhz']}_t_rise_{cr_pulse_params['t_rise_ns']}"
+            f"_ph_{cr_pulse_params['phase_rad']}_echoed_cr_{echoed_cr}_n_levels_{n_levels}"
+        )
+        perform_cr_pulse_evolution(
+            q_pair=[1, 2],
+            flat_len_ns=600.0,
+            cr_pulse_params=cr_pulse_params,
+            echoed_cr=echoed_cr,
+            n_levels=n_levels,
+            n_sub=2,
+            file_tag=file_tag,
+        )
