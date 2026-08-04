@@ -96,7 +96,7 @@ class TwoQubitPulseSimulator:
         self.M1, self.M2 = confusion_matrices   # per-qubit 2x2 readout error
         self.n_sub = n_sub
         self.dt_sample_ns = dt_sample_ns
-        self.dims = [q.n_levels for q in qubits]
+        self.dims = [q.n_levels for q in qubits] #both have to have the same dims right now. Not a logial restriction but lets keep it for now.
         self.dim = self.dims[0] * self.dims[1]
         self._build_operators()
 
