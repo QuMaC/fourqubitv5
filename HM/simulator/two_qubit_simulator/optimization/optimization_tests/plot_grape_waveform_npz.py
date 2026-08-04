@@ -10,6 +10,8 @@ The plot matches the style used by ``optimization/cr_grape.py``:
 Unlike the original helper, this utility forces the same symmetric y-limits on
 both quadrature panels (for example, setting ``ylim = 32`` gives
 ``[-32, 32]`` MHz on both I and Q).
+
+Also writes a standalone ``cr_grape_seed.npz`` containing the seed waveform.
 """
 
 from __future__ import annotations
@@ -33,6 +35,47 @@ def _resolved_ylim(user_ylim: float | None, values: np.ndarray) -> float:
         return 1.0
     # Round up to a neat 1 MHz boundary with a little margin.
     return float(np.ceil(1.05 * peak))
+
+
+def save_seed_npz(npz_path: Path, out_npz: Path) -> Path:
+    """Extract the seed waveform from a GRAPE ``.npz`` and save it standalone."""
+    with np.load(npz_path, allow_pickle=False) as d:
+        required = ["cr_half_seed_I", "cr_half_seed_Q"]
+        missing = [k for k in required if k not in d.files]
+        if missing:
+            raise KeyError(
+                f"Missing seed keys in {npz_path}: {missing}. "
+                f"Available keys: {sorted(d.files)}"
+            )
+
+        if "t_ns" in d.files:
+            t = np.asarray(d["t_ns"], dtype=float).reshape(-1)
+        else:
+            n = len(np.asarray(d["cr_half_seed_I"]).reshape(-1))
+            t = np.arange(n, dtype=float)
+
+        seed_i = np.asarray(d["cr_half_seed_I"], dtype=float).reshape(-1)
+        seed_q = np.asarray(d["cr_half_seed_Q"], dtype=float).reshape(-1)
+
+        payload: dict[str, np.ndarray] = {
+            "t_ns": t,
+            "cr_half_seed_I": seed_i,
+            "cr_half_seed_Q": seed_q,
+        }
+        optional_keys = (
+            "flat_knobs_seed",
+            "rise_start",
+            "flat_start",
+            "flat_stop",
+            "fall_start",
+        )
+        for key in optional_keys:
+            if key in d.files:
+                payload[key] = np.asarray(d[key])
+
+    out_npz.parent.mkdir(parents=True, exist_ok=True)
+    np.savez(out_npz, **payload)
+    return out_npz
 
 
 def plot_npz_waveform(npz_path: Path, out_png: Path, ylim: float | None = None) -> Path:
@@ -120,9 +163,13 @@ def main() -> None:
     ylim = 35.0  # MHz; set to None for auto-scaling
     npz_path = base_dir / "results" / "cr_grape_pulse.npz"
     out_png = base_dir / "results" / f"cr_grape_waveform_equal_ylim_{ylim}.png"
+    out_seed_npz = base_dir / "results" / "cr_grape_seed.npz"
 
-    out = plot_npz_waveform(npz_path, out_png, ylim=ylim)
-    print(f"Saved {out}")
+    seed_out = save_seed_npz(npz_path, out_seed_npz)
+    print(f"Saved {seed_out}")
+
+    # out = plot_npz_waveform(npz_path, out_png, ylim=ylim)
+    # print(f"Saved {out}")
 
 
 if __name__ == "__main__":

@@ -1,8 +1,8 @@
 """GRAPE-style optimization for echoed CR gates on the two-qubit pulse simulator.
 
 Only the flat-top knobs of one CR half are optimized.  Rise and fall use the lab
-``rise_arr`` / ``fall_arr`` templates, rescaled to meet the first and last knob
-(see ``assemble_cr_half_from_flat_knobs`` in ``engine/pulses.py``).  The echoed
+``rise_arr`` / ``fall_arr`` templates, rescaled to meet the first/last
+``n_link_samples`` flat samples (default 8; see ``assemble_cr_half_from_flat_knobs``).
 sequence is ``+u → Xπ → −u → Xπ``.
 """
 
@@ -95,6 +95,7 @@ class CRGrapeConfig:
     seed_amp_mhz: float = -32.0
     seed_phase_rad: float = 2.724
     t_rise_ns: int = 16
+    n_link_samples: int = 8
     target_gate: str | None = None
     amp_bound_mhz: float = 48.0
     leakage_weight: float = 0.0
@@ -301,6 +302,7 @@ class CRGrapeOptimizer:
             flat_len_ns=config.flat_len_ns,
             t_rise_ns=config.t_rise_ns,
             dt_ns=self.exp.dt_sample_ns,
+            n_link_samples=config.n_link_samples,
         )
         self._x_pi = self.exp.build_x_pi()
 
@@ -331,6 +333,7 @@ class CRGrapeOptimizer:
             flat_len_ns=self.config.flat_len_ns,
             t_rise_ns=self.config.t_rise_ns,
             dt_ns=self.exp.dt_sample_ns,
+            n_link_samples=self.config.n_link_samples,
         )
         if slices != self.half_slices:
             self.half_slices = slices
@@ -521,6 +524,7 @@ def optimize_echoed_cr_grape(
     seed_amp_mhz: float = -32.0,
     seed_phase_rad: float = 2.724,
     t_rise_ns: int = 16,
+    n_link_samples: int = 8,
     target_gate: str | None = None,
     amp_bound_mhz: float = 48.0,
     leakage_weight: float = 0.0,
@@ -553,6 +557,7 @@ def optimize_echoed_cr_grape(
         seed_amp_mhz=seed_amp_mhz,
         seed_phase_rad=seed_phase_rad,
         t_rise_ns=t_rise_ns,
+        n_link_samples=n_link_samples,
         target_gate=target_gate,
         amp_bound_mhz=amp_bound_mhz,
         leakage_weight=leakage_weight,
@@ -568,3 +573,327 @@ def optimize_echoed_cr_grape(
     if save:
         result.save(config.results_dir)
     return result
+
+
+@dataclass
+class LoopedGrapeConfig:
+    """Configuration for repeated GRAPE runs from the same seed."""
+
+    grape_config: CRGrapeConfig
+    n_cycles: int = 30
+    save_individual_cycles: bool = True
+    checkpoint_after_each_cycle: bool = True
+    results_dir: str | None = None
+
+
+@dataclass
+class LoopedGrapeResult:
+    """Outcome of multiple independent GRAPE runs from an identical seed."""
+
+    config: LoopedGrapeConfig
+    results: list[GrapeResult]
+
+    @property
+    def n_cycles(self) -> int:
+        return len(self.results)
+
+    @property
+    def cr_halves_opt(self) -> np.ndarray:
+        """Stacked optimized CR-half waveforms, shape ``(n_cycles, n_samples)``."""
+        return np.stack([r.cr_half_opt for r in self.results], axis=0)
+
+    @property
+    def cr_half_avg(self) -> np.ndarray:
+        return np.mean(self.cr_halves_opt, axis=0)
+
+    @property
+    def flat_knobs_stack(self) -> np.ndarray:
+        return np.stack([r.flat_knobs_opt for r in self.results], axis=0)
+
+    @property
+    def flat_knobs_avg(self) -> np.ndarray:
+        return np.mean(self.flat_knobs_stack, axis=0)
+
+    def metrics_table(self, *, include_average: bool = True) -> list[dict]:
+        rows = []
+        for i, r in enumerate(self.results, start=1):
+            m = dict(r.final_metrics)
+            m["cycle"] = i
+            m["label"] = f"cycle_{i:02d}"
+            rows.append(m)
+        if include_average and rows:
+            avg = {
+                "cycle": "avg",
+                "label": "average",
+                "process_fidelity": float(np.mean([r["process_fidelity"] for r in rows])),
+                "average_gate_fidelity": float(
+                    np.mean([r["average_gate_fidelity"] for r in rows])
+                ),
+                "process_fidelity_zx_90": float(
+                    np.mean([r["process_fidelity_zx_90"] for r in rows])
+                ),
+                "process_fidelity_zx_m90": float(
+                    np.mean([r["process_fidelity_zx_m90"] for r in rows])
+                ),
+                "leakage": float(np.mean([r["leakage"] for r in rows])),
+                "target_gate": rows[0]["target_gate"],
+            }
+            rows.append(avg)
+        return rows
+
+    def print_fidelity_table(self, *, include_average: bool = True) -> None:
+        rows = self.metrics_table(include_average=include_average)
+        header = (
+            f"{'cycle':>5}  {'target':>7}  {'F_proc':>8}  {'F_avg':>8}  "
+            f"{'F_zx90':>8}  {'F_zxm90':>8}  {'leakage':>8}"
+        )
+        print("\n" + header)
+        print("-" * len(header))
+        for row in rows:
+            cycle = row["cycle"]
+            cycle_s = f"{cycle:>5}" if isinstance(cycle, int) else f"{cycle:>5}"
+            print(
+                f"{cycle_s}  "
+                f"{row.get('target_gate', '?'):>7}  "
+                f"{row['process_fidelity']:8.5f}  "
+                f"{row['average_gate_fidelity']:8.5f}  "
+                f"{row['process_fidelity_zx_90']:8.5f}  "
+                f"{row['process_fidelity_zx_m90']:8.5f}  "
+                f"{row['leakage']:8.5f}"
+            )
+        print()
+
+    def plot_all_waveforms(self, out_png: str) -> None:
+        if not self.results:
+            return
+        exp = self.results[0].exp
+        dt = exp.dt_sample_ns if exp else 1.0
+        ref = self.results[0]
+        t = np.arange(ref.cr_half_opt.size, dtype=float) * dt
+        rs, re = ref.half_slices["rise"]
+        fs, fe = ref.half_slices["flat"]
+        ds, de = ref.half_slices["fall"]
+
+        fig, axes = plt.subplots(2, 1, figsize=(11, 7), sharex=True)
+        cmap = plt.cm.viridis(np.linspace(0.15, 0.85, self.n_cycles))
+
+        for ax, component in zip(axes, ("I", "Q")):
+            for i, (r, color) in enumerate(zip(self.results, cmap)):
+                y = r.cr_half_opt.real if component == "I" else r.cr_half_opt.imag
+                ax.plot(
+                    t, y, color=color, lw=0.9, alpha=0.55,
+                    label=f"cycle {i + 1}" if i < 3 or i == self.n_cycles - 1 else None,
+                )
+            avg_y = (
+                self.cr_half_avg.real if component == "I" else self.cr_half_avg.imag
+            )
+            ax.plot(t, avg_y, color="black", lw=2.2, ls="-", label="average", zorder=5)
+            ax.axvspan(t[rs], t[re - 1] if re > rs else t[rs], color="tab:blue", alpha=0.06)
+            ax.axvspan(t[fs], t[fe - 1] if fe > fs else t[fs], color="tab:orange", alpha=0.06)
+            ax.axvspan(t[ds], t[de - 1] if de > ds else t[ds], color="tab:purple", alpha=0.06)
+            ax.set_ylabel(f"{component} (MHz)")
+            ax.grid(alpha=0.35)
+            ax.legend(fontsize=7, loc="upper right", ncol=2)
+
+        axes[1].set_xlabel("time within one CR half (ns)")
+        axes[0].set_title(
+            f"Looped GRAPE waveforms  |  {self.n_cycles} cycles + average  |  "
+            f"flat={self.config.grape_config.flat_len_ns:.0f} ns"
+        )
+        plt.tight_layout()
+        plt.savefig(out_png, dpi=160)
+        plt.close(fig)
+
+    def _resolved_directory(self, directory: str | None) -> str:
+        directory = (
+            directory
+            or self.config.results_dir
+            or self.config.grape_config.results_dir
+            or _default_results_dir()
+        )
+        os.makedirs(directory, exist_ok=True)
+        return directory
+
+    def save_cycle_npz(self, cycle: int, result: GrapeResult, directory: str | None = None) -> str:
+        """Save one completed cycle immediately (crash-safe unit of work)."""
+        directory = self._resolved_directory(directory)
+        cycles_dir = os.path.join(directory, "cycles")
+        os.makedirs(cycles_dir, exist_ok=True)
+
+        dt = result.exp.dt_sample_ns if result.exp else 1.0
+        t_half = np.arange(result.cr_half_opt.size, dtype=float) * dt
+        cycle_npz = os.path.join(cycles_dir, f"cr_grape_cycle_{cycle:02d}.npz")
+        np.savez(
+            cycle_npz,
+            t_ns=t_half,
+            cycle=cycle,
+            flat_knobs_opt=result.flat_knobs_opt,
+            cr_half_opt_I=result.cr_half_opt.real,
+            cr_half_opt_Q=result.cr_half_opt.imag,
+            process_fidelity=result.final_metrics["process_fidelity"],
+            average_gate_fidelity=result.final_metrics["average_gate_fidelity"],
+            leakage=result.final_metrics["leakage"],
+        )
+        return cycle_npz
+
+    def save(
+        self,
+        directory: str | None = None,
+        *,
+        status: str = "complete",
+        quiet: bool = False,
+    ) -> dict[str, str]:
+        """Write combined artifacts for all completed cycles so far."""
+        if not self.results:
+            return {}
+        directory = self._resolved_directory(directory)
+
+        json_path = os.path.join(directory, "cr_grape_looped_result.json")
+        npz_path = os.path.join(directory, "cr_grape_looped_all.npz")
+        wf_png = os.path.join(directory, "cr_grape_looped_waveforms.png")
+
+        ref = self.results[0]
+        dt = ref.exp.dt_sample_ns if ref.exp else 1.0
+        t_half = np.arange(ref.cr_half_opt.size, dtype=float) * dt
+
+        halves = self.cr_halves_opt
+        halves_with_avg = np.vstack([halves, self.cr_half_avg[np.newaxis, :]])
+        knobs_with_avg = np.vstack(
+            [self.flat_knobs_stack, self.flat_knobs_avg[np.newaxis, :]]
+        )
+
+        payload = _to_jsonable(
+            {
+                "status": status,
+                "completed_cycles": self.n_cycles,
+                "target_cycles": self.config.n_cycles,
+                "looped_config": {
+                    "n_cycles": self.config.n_cycles,
+                    "grape_config": asdict(self.config.grape_config),
+                },
+                "metrics_table": self.metrics_table(),
+                "half_slices": {
+                    k: {"start": v[0], "stop": v[1]}
+                    for k, v in ref.half_slices.items()
+                },
+            }
+        )
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+
+        np.savez(
+            npz_path,
+            t_ns=t_half,
+            n_cycles=self.n_cycles,
+            cr_half_opt_I=halves_with_avg.real,
+            cr_half_opt_Q=halves_with_avg.imag,
+            flat_knobs_opt_real=knobs_with_avg.real,
+            flat_knobs_opt_imag=knobs_with_avg.imag,
+            is_average=np.array(
+                [False] * self.n_cycles + [True], dtype=bool
+            ),
+            rise_start=ref.half_slices["rise"][0],
+            flat_start=ref.half_slices["flat"][0],
+            flat_stop=ref.half_slices["flat"][1],
+            fall_start=ref.half_slices["fall"][0],
+        )
+
+        paths = {"json": json_path, "npz": npz_path, "waveform_png": wf_png}
+
+        if self.config.save_individual_cycles:
+            cycles_dir = os.path.join(directory, "cycles")
+            os.makedirs(cycles_dir, exist_ok=True)
+            for i, r in enumerate(self.results, start=1):
+                cycle_npz = os.path.join(cycles_dir, f"cr_grape_cycle_{i:02d}.npz")
+                if os.path.exists(cycle_npz):
+                    paths[f"cycle_{i:02d}_npz"] = cycle_npz
+                    continue
+                saved = self.save_cycle_npz(i, r, directory)
+                paths[f"cycle_{i:02d}_npz"] = saved
+
+        self.plot_all_waveforms(wf_png)
+        if not quiet:
+            for p in paths.values():
+                print(f"Saved {p}")
+        return paths
+
+    def save_checkpoint(
+        self,
+        directory: str | None = None,
+        *,
+        completed_cycle: int | None = None,
+    ) -> dict[str, str]:
+        """Persist partial progress after a cycle finishes."""
+        status = (
+            "complete"
+            if self.n_cycles >= self.config.n_cycles
+            else "in_progress"
+        )
+        paths = self.save(directory, status=status, quiet=True)
+        if completed_cycle is not None:
+            m = self.results[-1].final_metrics
+            print(
+                f"Checkpoint cycle {completed_cycle}/{self.config.n_cycles}  "
+                f"F_proc={m['process_fidelity']:.5f}  "
+                f"leakage={m['leakage']:.5f}  "
+                f"-> {paths.get('json', '?')}"
+            )
+        return paths
+
+
+def run_looped_grape(
+    n_cycles: int = 30,
+    grape_config: CRGrapeConfig | None = None,
+    exp: CR_len_sweep | None = None,
+    save_individual_cycles: bool = True,
+    checkpoint_after_each_cycle: bool = True,
+    results_dir: str | None = None,
+    save: bool = True,
+    **grape_kwargs,
+) -> LoopedGrapeResult:
+    """Run ``n_cycles`` independent GRAPE optimizations from the same seed.
+
+    Each cycle builds a fresh ``CRGrapeOptimizer`` (same config / seed params).
+    Results are summarized in a terminal fidelity table, overlaid I/Q plot, and
+    a combined ``.npz`` whose last row is the waveform average.
+    """
+    if grape_config is None:
+        grape_config = CRGrapeConfig(**grape_kwargs)
+    if results_dir is not None:
+        grape_config.results_dir = results_dir
+
+    loop_config = LoopedGrapeConfig(
+        grape_config=grape_config,
+        n_cycles=n_cycles,
+        save_individual_cycles=save_individual_cycles,
+        checkpoint_after_each_cycle=checkpoint_after_each_cycle,
+        results_dir=results_dir,
+    )
+
+    print(
+        f"Looped GRAPE: {n_cycles} cycles from identical seed  "
+        f"(flat={grape_config.flat_len_ns:.0f} ns, knobs={grape_config.n_flat_knobs})"
+    )
+    if save and checkpoint_after_each_cycle:
+        print("Checkpointing after each cycle -> results survive interruption.")
+
+    results: list[GrapeResult] = []
+    for cycle in range(1, n_cycles + 1):
+        print(f"\n{'=' * 60}\nCycle {cycle}/{n_cycles}\n{'=' * 60}")
+        optimizer = CRGrapeOptimizer(grape_config, exp=exp)
+        result = optimizer.run()
+        results.append(result)
+
+        if save and checkpoint_after_each_cycle:
+            partial = LoopedGrapeResult(config=loop_config, results=list(results))
+            if save_individual_cycles:
+                partial.save_cycle_npz(cycle, result, results_dir)
+            partial.save_checkpoint(results_dir, completed_cycle=cycle)
+
+    looped = LoopedGrapeResult(config=loop_config, results=results)
+    looped.print_fidelity_table()
+    if save and not checkpoint_after_each_cycle:
+        looped.save(results_dir)
+    elif save:
+        looped.save(results_dir, status="complete")
+    return looped

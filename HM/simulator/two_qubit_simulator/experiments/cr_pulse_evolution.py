@@ -461,9 +461,9 @@ if __name__ == "__main__":
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
         "optimization", "optimization_tests", "results", "cr_grape_pulse.npz",
     )
-    ARB_NPZ_PATH = None
+    ARB_NPZ_PATH =f'/home/hm/IITB/TIFR/Software/Hari_6_qubit/fourqubitv5/HM/simulator/two_qubit_simulator/optimization/optimization_tests/results/robust/cr_grape_robust_zz0p1824MHz_20260702_213910.npz'
     if ARB_NPZ_PATH:
-        n_levels = 6
+        n_levels = 3
         perform_arb_pulse_evolution(
             ARB_NPZ_PATH,
             q_pair=[1, 2],
@@ -479,15 +479,15 @@ if __name__ == "__main__":
             "t_rise_ns": int(16),
             "phase_rad": 0,
         }
-        echoed_cr = False
-        n_levels = 2
+        echoed_cr = True
+        n_levels = 3
         file_tag = (
             f"amp_{cr_pulse_params['amp_mhz']}_t_rise_{cr_pulse_params['t_rise_ns']}"
             f"_ph_{cr_pulse_params['phase_rad']}_echoed_cr_{echoed_cr}_n_levels_{n_levels}"
         )
         perform_cr_pulse_evolution(
             q_pair=[1, 2],
-            flat_len_ns=600.0,
+            flat_len_ns=84.0,
             cr_pulse_params=cr_pulse_params,
             echoed_cr=echoed_cr,
             n_levels=n_levels,
