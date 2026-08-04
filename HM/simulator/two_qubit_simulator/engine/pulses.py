@@ -103,14 +103,19 @@ def assemble_cr_half_from_flat_knobs(
     flat_len_ns: float,
     t_rise_ns: float | int,
     dt_ns: float = DT_SAMPLE_NS,
+    n_link_samples: int = 8,
 ) -> tuple[np.ndarray, dict[str, int]]:
     """Build one CR-half complex envelope (MHz) from flat-top knobs.
 
     GRAPE optimizes only ``flat_knobs`` (complex, one per flat segment).  The
-    lab rise/fall templates are rescaled so they meet the first and last knob:
+    lab rise/fall templates are rescaled to meet the flat region at its edges:
 
-    - rise ends at ``flat_knobs[0]``
-    - fall starts at ``flat_knobs[-1]`` (independent of rise)
+    - rise ends at the mean of the first ``n_link_samples`` flat samples
+    - fall starts at the mean of the last ``n_link_samples`` flat samples
+      (independent of rise)
+
+  ``n_link_samples`` defaults to 8.  When the flat top is shorter than
+    ``n_link_samples``, all available flat samples are used.
 
     Returns ``(waveform, slice_indices)`` where ``slice_indices`` has keys
     ``rise``, ``flat``, ``fall`` giving sample ranges on the sim grid.
@@ -142,18 +147,19 @@ def assemble_cr_half_from_flat_knobs(
             end = min(start + 1, n_flat)
         flat[start:end] = flat_knobs[i]
 
-    u0 = flat_knobs[0]
-    u_last = flat_knobs[-1]
+    n_link = max(1, min(int(n_link_samples), n_flat))
+    u_rise_end = np.mean(flat[:n_link])
+    u_fall_start = np.mean(flat[-n_link:])
 
     rise_end = float(rise[-1])
     fall_start = float(fall[0])
     if abs(rise_end) < 1e-12:
-        raise ValueError("rise template ends at zero; cannot anchor to first knob")
+        raise ValueError("rise template ends at zero; cannot anchor to flat edge")
     if abs(fall_start) < 1e-12:
-        raise ValueError("fall template starts at zero; cannot anchor to last knob")
+        raise ValueError("fall template starts at zero; cannot anchor to flat edge")
 
-    rise_part = (rise / rise_end) * u0
-    fall_part = (fall / fall_start) * u_last
+    rise_part = (rise / rise_end) * u_rise_end
+    fall_part = (fall / fall_start) * u_fall_start
 
     wf = np.concatenate([rise_part.astype(complex), flat, fall_part.astype(complex)])
 
@@ -165,12 +171,10 @@ def assemble_cr_half_from_flat_knobs(
         "fall": (n_rise + n_flat, n_rise + n_flat + n_fall),
     }
 
-    if not np.allclose(rise_part[-1], u0):
-        raise RuntimeError("rise/first-knob continuity check failed")
-    if not np.allclose(fall_part[0], u_last):
-        raise RuntimeError("fall/last-knob continuity check failed")
-    if not np.allclose(flat[0], u0) or not np.allclose(flat[-1], u_last):
-        raise RuntimeError("flat boundary knob assignment failed")
+    if not np.allclose(rise_part[-1], u_rise_end):
+        raise RuntimeError("rise/flat-edge continuity check failed")
+    if not np.allclose(fall_part[0], u_fall_start):
+        raise RuntimeError("fall/flat-edge continuity check failed")
 
     return wf, slices
 
