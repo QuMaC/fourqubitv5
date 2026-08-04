@@ -23,6 +23,12 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 
+from HM.simulator.two_qubit_simulator.engine.pulses import (
+    expand_samples_held_nsub,
+    scale_sample_index,
+)
+
+
 def _resolved_ylim(user_ylim: float | None, values: np.ndarray) -> float:
     """Return a positive symmetric y-limit magnitude for both I/Q panels."""
     if user_ylim is not None:
@@ -78,7 +84,12 @@ def save_seed_npz(npz_path: Path, out_npz: Path) -> Path:
     return out_npz
 
 
-def plot_npz_waveform(npz_path: Path, out_png: Path, ylim: float | None = None) -> Path:
+def plot_npz_waveform(
+    npz_path: Path,
+    out_png: Path,
+    ylim: float | None = None,
+    n_sub: int = 2,
+) -> Path:
     with np.load(npz_path, allow_pickle=False) as d:
         required = [
             "cr_half_seed_I",
@@ -98,10 +109,12 @@ def plot_npz_waveform(npz_path: Path, out_png: Path, ylim: float | None = None) 
 
         # Prefer saved t-axis if present; otherwise assume 1 ns sampling.
         if "t_ns" in d.files:
-            t = np.asarray(d["t_ns"], dtype=float).reshape(-1)
+            t_sample = np.asarray(d["t_ns"], dtype=float).reshape(-1)
+            dt = float(t_sample[1] - t_sample[0]) if len(t_sample) > 1 else 1.0
         else:
             n = len(np.asarray(d["cr_half_opt_I"]).reshape(-1))
-            t = np.arange(n, dtype=float)
+            t_sample = np.arange(n, dtype=float)
+            dt = 1.0
 
         seed_i = np.asarray(d["cr_half_seed_I"], dtype=float).reshape(-1)
         seed_q = np.asarray(d["cr_half_seed_Q"], dtype=float).reshape(-1)
@@ -112,34 +125,47 @@ def plot_npz_waveform(npz_path: Path, out_png: Path, ylim: float | None = None) 
         fs = int(np.asarray(d["flat_start"]).item())
         fe = int(np.asarray(d["flat_stop"]).item())
         ds = int(np.asarray(d["fall_start"]).item())
-        de = len(t)
 
-    if not (len(seed_i) == len(seed_q) == len(opt_i) == len(opt_q) == len(t)):
+    if not (len(seed_i) == len(seed_q) == len(opt_i) == len(opt_q) == len(t_sample)):
         raise ValueError("Waveform arrays and time axis have inconsistent lengths")
 
-    all_vals = np.concatenate([seed_i, seed_q, opt_i, opt_q])
+    n_sub = max(1, int(n_sub))
+    t, seed_i_e = expand_samples_held_nsub(seed_i, dt, n_sub)
+    _, seed_q_e = expand_samples_held_nsub(seed_q, dt, n_sub)
+    _, opt_i_e = expand_samples_held_nsub(opt_i, dt, n_sub)
+    _, opt_q_e = expand_samples_held_nsub(opt_q, dt, n_sub)
+    rs_e = scale_sample_index(rs, n_sub)
+    fs_e = scale_sample_index(fs, n_sub)
+    fe_e = scale_sample_index(fe, n_sub)
+    ds_e = scale_sample_index(ds, n_sub)
+    de_e = len(t)
+
+    all_vals = np.concatenate([seed_i_e, seed_q_e, opt_i_e, opt_q_e])
     y_lim = _resolved_ylim(ylim, all_vals)
 
     fig, axes = plt.subplots(2, 1, figsize=(10, 6), sharex=True)
     panels = (
-        ("I", seed_i, opt_i),
-        ("Q", seed_q, opt_q),
+        ("I", seed_i_e, opt_i_e),
+        ("Q", seed_q_e, opt_q_e),
     )
     for ax, (label, seed_y, opt_y) in zip(axes, panels):
         ax.plot(t, seed_y, color="0.65", lw=1.2, ls="--", label=f"seed {label} (MHz)")
         ax.plot(t, opt_y, color="tab:green", lw=1.6, label=f"opt {label} (MHz)")
-        ax.axvspan(t[rs], t[fs - 1] if fs > rs else t[rs], color="tab:blue", alpha=0.08)
-        ax.axvspan(t[fs], t[fe - 1] if fe > fs else t[fs], color="tab:orange", alpha=0.08)
-        ax.axvspan(t[ds], t[de - 1] if de > ds else t[ds], color="tab:purple", alpha=0.08)
+        ax.axvspan(t[rs_e], t[fs_e - 1] if fs_e > rs_e else t[rs_e], color="tab:blue", alpha=0.08)
+        ax.axvspan(t[fs_e], t[fe_e - 1] if fe_e > fs_e else t[fs_e], color="tab:orange", alpha=0.08)
+        ax.axvspan(t[ds_e], t[de_e - 1] if de_e > ds_e else t[ds_e], color="tab:purple", alpha=0.08)
         ax.set_ylabel(f"{label} (MHz)")
         ax.set_ylim(-y_lim, y_lim)
         ax.grid(alpha=0.35)
         ax.legend(fontsize=8, loc="upper right")
 
-    axes[1].set_xlabel("time within one CR half (ns)")
+    axes[1].set_xlabel(
+        f"time within one CR half (ns)  |  held at n_sub={n_sub}  "
+        f"(dt_sub={dt / n_sub:g} ns)"
+    )
     axes[0].set_title(
         f"CR half envelope from {npz_path.name}: seed vs optimized "
-        f"(shared y-limit = ±{y_lim:.3g} MHz)"
+        f"(shared y-limit = ±{y_lim:.3g} MHz; each sample held ×{n_sub})"
     )
     fig.text(
         0.99,

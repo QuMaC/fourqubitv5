@@ -21,6 +21,8 @@ from tqdm import tqdm
 
 from HM.simulator.two_qubit_simulator.engine.pulses import (
     assemble_cr_half_from_flat_knobs,
+    expand_samples_held_nsub,
+    scale_sample_index,
     seed_flat_knobs_from_calibrated_cr,
 )
 from HM.simulator.two_qubit_simulator.experiments.cr_len_sweep import CR_len_sweep
@@ -228,26 +230,38 @@ class GrapeResult:
 
     def plot_waveform(self, out_png: str) -> None:
         dt = self.exp.dt_sample_ns if self.exp else 1.0
-        t = np.arange(len(self.cr_half_opt), dtype=float) * dt
+        n_sub = int(self.exp.simulator.n_sub) if self.exp else 2
         rs, re = self.half_slices["rise"]
         fs, fe = self.half_slices["flat"]
         ds, de = self.half_slices["fall"]
 
+        t, seed_exp = expand_samples_held_nsub(self.cr_half_seed, dt, n_sub)
+        _, opt_exp = expand_samples_held_nsub(self.cr_half_opt, dt, n_sub)
+        rs_e, re_e = scale_sample_index(rs, n_sub), scale_sample_index(re, n_sub)
+        fs_e, fe_e = scale_sample_index(fs, n_sub), scale_sample_index(fe, n_sub)
+        ds_e, de_e = scale_sample_index(ds, n_sub), scale_sample_index(de, n_sub)
+
         fig, axes = plt.subplots(2, 1, figsize=(10, 6), sharex=True)
         for ax, key in zip(axes, ("I", "Q")):
-            seed_y = self.cr_half_seed.real if key == "I" else self.cr_half_seed.imag
-            opt_y = self.cr_half_opt.real if key == "I" else self.cr_half_opt.imag
+            seed_y = seed_exp.real if key == "I" else seed_exp.imag
+            opt_y = opt_exp.real if key == "I" else opt_exp.imag
             ax.plot(t, seed_y, color="0.65", lw=1.2, ls="--", label=f"seed {key} (MHz)")
             ax.plot(t, opt_y, color="tab:green", lw=1.6, label=f"opt {key} (MHz)")
-            ax.axvspan(t[rs], t[re - 1] if re > rs else t[rs], color="tab:blue", alpha=0.08)
-            ax.axvspan(t[fs], t[fe - 1] if fe > fs else t[fs], color="tab:orange", alpha=0.08)
-            ax.axvspan(t[ds], t[de - 1] if de > ds else t[ds], color="tab:purple", alpha=0.08)
+            ax.axvspan(t[rs_e], t[re_e - 1] if re_e > rs_e else t[rs_e], color="tab:blue", alpha=0.08)
+            ax.axvspan(t[fs_e], t[fe_e - 1] if fe_e > fs_e else t[fs_e], color="tab:orange", alpha=0.08)
+            ax.axvspan(t[ds_e], t[de_e - 1] if de_e > ds_e else t[ds_e], color="tab:purple", alpha=0.08)
             ax.set_ylabel(f"{key} (MHz)")
             ax.grid(alpha=0.35)
             ax.legend(fontsize=8, loc="upper right")
 
-        axes[1].set_xlabel("time within one CR half (ns)")
-        axes[0].set_title("CR half envelope: seed vs optimized (shaded: rise / flat / fall)")
+        axes[1].set_xlabel(
+            f"time within one CR half (ns)  |  held at n_sub={n_sub}  "
+            f"(dt_sub={dt / n_sub:g} ns)"
+        )
+        axes[0].set_title(
+            "CR half envelope: seed vs optimized "
+            f"(shaded: rise / flat / fall; each sample held ×{n_sub})"
+        )
         fig.text(0.99, 0.01, "blue=rise  orange=flat  purple=fall", ha="right", va="bottom",
                  fontsize=8, color="0.35")
         plt.tight_layout()
@@ -668,37 +682,46 @@ class LoopedGrapeResult:
             return
         exp = self.results[0].exp
         dt = exp.dt_sample_ns if exp else 1.0
+        n_sub = int(exp.simulator.n_sub) if exp else 2
         ref = self.results[0]
-        t = np.arange(ref.cr_half_opt.size, dtype=float) * dt
         rs, re = ref.half_slices["rise"]
         fs, fe = ref.half_slices["flat"]
         ds, de = ref.half_slices["fall"]
+        t, _ = expand_samples_held_nsub(ref.cr_half_opt, dt, n_sub)
+        rs_e, re_e = scale_sample_index(rs, n_sub), scale_sample_index(re, n_sub)
+        fs_e, fe_e = scale_sample_index(fs, n_sub), scale_sample_index(fe, n_sub)
+        ds_e, de_e = scale_sample_index(ds, n_sub), scale_sample_index(de, n_sub)
 
         fig, axes = plt.subplots(2, 1, figsize=(11, 7), sharex=True)
         cmap = plt.cm.viridis(np.linspace(0.15, 0.85, self.n_cycles))
 
         for ax, component in zip(axes, ("I", "Q")):
             for i, (r, color) in enumerate(zip(self.results, cmap)):
-                y = r.cr_half_opt.real if component == "I" else r.cr_half_opt.imag
+                y0 = r.cr_half_opt.real if component == "I" else r.cr_half_opt.imag
+                _, y = expand_samples_held_nsub(y0, dt, n_sub)
                 ax.plot(
                     t, y, color=color, lw=0.9, alpha=0.55,
                     label=f"cycle {i + 1}" if i < 3 or i == self.n_cycles - 1 else None,
                 )
-            avg_y = (
+            avg0 = (
                 self.cr_half_avg.real if component == "I" else self.cr_half_avg.imag
             )
+            _, avg_y = expand_samples_held_nsub(avg0, dt, n_sub)
             ax.plot(t, avg_y, color="black", lw=2.2, ls="-", label="average", zorder=5)
-            ax.axvspan(t[rs], t[re - 1] if re > rs else t[rs], color="tab:blue", alpha=0.06)
-            ax.axvspan(t[fs], t[fe - 1] if fe > fs else t[fs], color="tab:orange", alpha=0.06)
-            ax.axvspan(t[ds], t[de - 1] if de > ds else t[ds], color="tab:purple", alpha=0.06)
+            ax.axvspan(t[rs_e], t[re_e - 1] if re_e > rs_e else t[rs_e], color="tab:blue", alpha=0.06)
+            ax.axvspan(t[fs_e], t[fe_e - 1] if fe_e > fs_e else t[fs_e], color="tab:orange", alpha=0.06)
+            ax.axvspan(t[ds_e], t[de_e - 1] if de_e > ds_e else t[ds_e], color="tab:purple", alpha=0.06)
             ax.set_ylabel(f"{component} (MHz)")
             ax.grid(alpha=0.35)
             ax.legend(fontsize=7, loc="upper right", ncol=2)
 
-        axes[1].set_xlabel("time within one CR half (ns)")
+        axes[1].set_xlabel(
+            f"time within one CR half (ns)  |  held at n_sub={n_sub}  "
+            f"(dt_sub={dt / n_sub:g} ns)"
+        )
         axes[0].set_title(
-            f"Looped GRAPE waveforms  |  {self.n_cycles} cycles + average  |  "
-            f"flat={self.config.grape_config.flat_len_ns:.0f} ns"
+            f"Looped GRAPE — {self.n_cycles} cycle(s) + average "
+            f"(each sample held ×{n_sub})"
         )
         plt.tight_layout()
         plt.savefig(out_png, dpi=160)

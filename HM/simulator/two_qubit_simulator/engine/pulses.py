@@ -219,6 +219,31 @@ def seed_flat_knobs_from_calibrated_cr(
     return knobs
 
 
+def expand_samples_held_nsub(
+    y: np.ndarray,
+    dt_ns: float,
+    n_sub: int = 2,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Hold each sample for ``n_sub`` substeps (matches sim envelope hold).
+
+    Returns ``(t_ns, y_expanded)`` with spacing ``dt_ns / n_sub``. Useful for
+    waveform plots that should show the piecewise-constant drive as the
+    propagator sees it (envelope constant over each sample, stepped at
+    ``dt_sample``; substeps only refine the Hamiltonian time).
+    """
+    n_sub = max(1, int(n_sub))
+    y = np.asarray(y)
+    y_exp = np.repeat(y, n_sub, axis=-1)
+    dt_sub = float(dt_ns) / float(n_sub)
+    t = np.arange(y_exp.shape[-1], dtype=float) * dt_sub
+    return t, y_exp
+
+
+def scale_sample_index(index: int, n_sub: int) -> int:
+    """Map a dt_sample index onto the held-n_sub plot grid."""
+    return int(index) * max(1, int(n_sub))
+
+
 def flat_pulse(amp: complex, duration_ns: float,
                dt_ns: float = DT_SAMPLE_NS) -> np.ndarray:
     """Constant complex envelope."""

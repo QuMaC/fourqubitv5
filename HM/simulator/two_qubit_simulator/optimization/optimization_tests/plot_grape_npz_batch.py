@@ -10,6 +10,11 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 
+from HM.simulator.two_qubit_simulator.engine.pulses import (
+    expand_samples_held_nsub,
+    scale_sample_index,
+)
+
 BASE = Path(__file__).resolve().parent / "results"
 
 NPZ_SOURCES = [
@@ -28,11 +33,25 @@ def _load_json(parent: Path, stem: str) -> dict:
         return json.load(f)
 
 
-def _shade_regions(ax, t: np.ndarray, rs: int, fs: int, fe: int, ds: int) -> None:
-    de = len(t)
-    ax.axvspan(t[rs], t[fs - 1] if fs > rs else t[rs], color="tab:blue", alpha=0.06)
-    ax.axvspan(t[fs], t[fe - 1] if fe > fs else t[fs], color="tab:orange", alpha=0.06)
-    ax.axvspan(t[ds], t[de - 1] if de > ds else t[ds], color="tab:purple", alpha=0.06)
+def _shade_regions(
+    ax,
+    t: np.ndarray,
+    rs: int,
+    fs: int,
+    fe: int,
+    ds: int,
+    *,
+    n_sub: int = 1,
+) -> None:
+    n_sub = max(1, int(n_sub))
+    rs_e = scale_sample_index(rs, n_sub)
+    fs_e = scale_sample_index(fs, n_sub)
+    fe_e = scale_sample_index(fe, n_sub)
+    ds_e = scale_sample_index(ds, n_sub)
+    de_e = len(t)
+    ax.axvspan(t[rs_e], t[fs_e - 1] if fs_e > rs_e else t[rs_e], color="tab:blue", alpha=0.06)
+    ax.axvspan(t[fs_e], t[fe_e - 1] if fe_e > fs_e else t[fs_e], color="tab:orange", alpha=0.06)
+    ax.axvspan(t[ds_e], t[de_e - 1] if de_e > ds_e else t[ds_e], color="tab:purple", alpha=0.06)
 
 
 def _looped_fidelities(parent: Path) -> list[dict]:
@@ -40,13 +59,14 @@ def _looped_fidelities(parent: Path) -> list[dict]:
     return [row for row in payload["metrics_table"] if isinstance(row.get("cycle"), int)]
 
 
-def plot_looped_npz(npz_path: Path, out_png: Path) -> Path:
+def plot_looped_npz(npz_path: Path, out_png: Path, *, n_sub: int = 2) -> Path:
     parent = npz_path.parent
     fidelities = _looped_fidelities(parent)
     label = parent.name
+    n_sub = max(1, int(n_sub))
 
     with np.load(npz_path, allow_pickle=False) as d:
-        t = np.asarray(d["t_ns"], dtype=float).reshape(-1)
+        t_sample = np.asarray(d["t_ns"], dtype=float).reshape(-1)
         opt_i = np.asarray(d["cr_half_opt_I"], dtype=float)
         opt_q = np.asarray(d["cr_half_opt_Q"], dtype=float)
         is_avg = np.asarray(d["is_average"], dtype=bool).reshape(-1)
@@ -55,6 +75,8 @@ def plot_looped_npz(npz_path: Path, out_png: Path) -> Path:
         fe = int(np.asarray(d["flat_stop"]).item())
         ds = int(np.asarray(d["fall_start"]).item())
 
+    dt = _dt_ns(t_sample)
+    t, _ = expand_samples_held_nsub(opt_i[0], dt, n_sub)
     n_rows = opt_i.shape[0]
     n_cycles = int(np.sum(~is_avg))
     cmap = plt.cm.viridis(np.linspace(0.15, 0.85, max(n_cycles, 1)))
@@ -84,15 +106,22 @@ def plot_looped_npz(npz_path: Path, out_png: Path) -> Path:
                 leg = None
 
         for ax, y_arr, comp in zip(axes, (opt_i, opt_q), ("I", "Q")):
-            ax.plot(t, y_arr[row], color=color, lw=lw, alpha=0.75 if not is_avg[row] else 1.0,
+            _, y = expand_samples_held_nsub(y_arr[row], dt, n_sub)
+            ax.plot(t, y, color=color, lw=lw, alpha=0.75 if not is_avg[row] else 1.0,
                     label=leg if comp == "I" else None, zorder=zorder)
-            _shade_regions(ax, t, rs, fs, fe, ds)
+            _shade_regions(ax, t, rs, fs, fe, ds, n_sub=n_sub)
             ax.set_ylabel(f"{comp} (MHz)")
             ax.grid(alpha=0.35)
 
     axes[0].legend(fontsize=7, loc="upper right", ncol=2)
-    axes[1].set_xlabel("time within one CR half (ns)")
-    axes[0].set_title(f"Looped GRAPE — {label}  |  {n_cycles} cycle(s) + average")
+    axes[1].set_xlabel(
+        f"time within one CR half (ns)  |  held at n_sub={n_sub}  "
+        f"(dt_sub={dt / n_sub:g} ns)"
+    )
+    axes[0].set_title(
+        f"Looped GRAPE — {label}  |  {n_cycles} cycle(s) + average "
+        f"(each sample held ×{n_sub})"
+    )
     fig.text(0.99, 0.01, "blue=rise  orange=flat  purple=fall", ha="right", va="bottom",
              fontsize=8, color="0.35")
     plt.tight_layout()
@@ -102,14 +131,15 @@ def plot_looped_npz(npz_path: Path, out_png: Path) -> Path:
     return out_png
 
 
-def plot_robust_npz(npz_path: Path, out_png: Path) -> Path:
+def plot_robust_npz(npz_path: Path, out_png: Path, *, n_sub: int = 2) -> Path:
     parent = npz_path.parent
     payload = _load_json(parent, npz_path.stem)
     seed_m = payload["seed_metrics"]
     final_m = payload["final_metrics"]
+    n_sub = max(1, int(n_sub))
 
     with np.load(npz_path, allow_pickle=False) as d:
-        t = np.asarray(d["t_ns"], dtype=float).reshape(-1)
+        t_sample = np.asarray(d["t_ns"], dtype=float).reshape(-1)
         seed_i = np.asarray(d["cr_half_seed_I"], dtype=float).reshape(-1)
         seed_q = np.asarray(d["cr_half_seed_Q"], dtype=float).reshape(-1)
         opt_i = np.asarray(d["cr_half_opt_I"], dtype=float).reshape(-1)
@@ -119,22 +149,33 @@ def plot_robust_npz(npz_path: Path, out_png: Path) -> Path:
         fe = int(np.asarray(d["flat_stop"]).item())
         ds = int(np.asarray(d["fall_start"]).item())
 
+    dt = _dt_ns(t_sample)
+    t, seed_i_e = expand_samples_held_nsub(seed_i, dt, n_sub)
+    _, seed_q_e = expand_samples_held_nsub(seed_q, dt, n_sub)
+    _, opt_i_e = expand_samples_held_nsub(opt_i, dt, n_sub)
+    _, opt_q_e = expand_samples_held_nsub(opt_q, dt, n_sub)
+
     fig, axes = plt.subplots(2, 1, figsize=(10, 6.5), sharex=True)
     for ax, seed_y, opt_y, comp in zip(
         axes,
-        (seed_i, seed_q),
-        (opt_i, opt_q),
+        (seed_i_e, seed_q_e),
+        (opt_i_e, opt_q_e),
         ("I", "Q"),
     ):
         ax.plot(t, seed_y, color="0.65", lw=1.2, ls="--", label=f"seed {comp} (MHz)")
         ax.plot(t, opt_y, color="tab:green", lw=1.6, label=f"opt {comp} (MHz)")
-        _shade_regions(ax, t, rs, fs, fe, ds)
+        _shade_regions(ax, t, rs, fs, fe, ds, n_sub=n_sub)
         ax.set_ylabel(f"{comp} (MHz)")
         ax.grid(alpha=0.35)
         ax.legend(fontsize=8, loc="upper right")
 
-    axes[1].set_xlabel("time within one CR half (ns)")
-    axes[0].set_title("Robust CR half: seed vs optimized")
+    axes[1].set_xlabel(
+        f"time within one CR half (ns)  |  held at n_sub={n_sub}  "
+        f"(dt_sub={dt / n_sub:g} ns)"
+    )
+    axes[0].set_title(
+        f"Robust CR half: seed vs optimized (each sample held ×{n_sub})"
+    )
     summary = (
         f"seed:  F_comb={seed_m['process_fidelity']:.5f}   "
         f"F_a={seed_m['process_fidelity_a']:.5f}   F_b={seed_m['process_fidelity_b']:.5f}\n"
@@ -292,18 +333,25 @@ def _overlay_trace(npz_path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, 
     return t, i_y, q_y, label
 
 
-def plot_looped_seed_npz(seed_npz: Path, looped_npz: Path, out_png: Path) -> Path:
+def plot_looped_seed_npz(
+    seed_npz: Path, looped_npz: Path, out_png: Path, *, n_sub: int = 2
+) -> Path:
     """Looped run: initial seed vs optimized average envelope."""
     parent = seed_npz.parent
-    t, seed_i, seed_q, rs, fs, fe, ds = _load_looped_seed(seed_npz)
+    t_sample, seed_i, seed_q, rs, fs, fe, ds = _load_looped_seed(seed_npz)
     _, opt_i, opt_q, f_avg = _looped_avg_opt(looped_npz)
-    seed_label = _looped_seed_label(parent)
+    n_sub = max(1, int(n_sub))
+    dt = _dt_ns(t_sample)
+    t, seed_i_e = expand_samples_held_nsub(seed_i, dt, n_sub)
+    _, seed_q_e = expand_samples_held_nsub(seed_q, dt, n_sub)
+    _, opt_i_e = expand_samples_held_nsub(opt_i, dt, n_sub)
+    _, opt_q_e = expand_samples_held_nsub(opt_q, dt, n_sub)
 
     fig, axes = plt.subplots(2, 1, figsize=(10, 6.5), sharex=True)
     for ax, seed_y, opt_y, comp in zip(
         axes,
-        (seed_i, seed_q),
-        (opt_i, opt_q),
+        (seed_i_e, seed_q_e),
+        (opt_i_e, opt_q_e),
         ("I", "Q"),
     ):
         ax.plot(t, seed_y, color="0.65", lw=1.2, ls="--", label=f"seed {comp} (MHz)")
@@ -314,13 +362,19 @@ def plot_looped_seed_npz(seed_npz: Path, looped_npz: Path, out_png: Path) -> Pat
             lw=1.6,
             label=f"opt avg {comp}  F={f_avg:.5f}",
         )
-        _shade_regions(ax, t, rs, fs, fe, ds)
+        _shade_regions(ax, t, rs, fs, fe, ds, n_sub=n_sub)
         ax.set_ylabel(f"{comp} (MHz)")
         ax.grid(alpha=0.35)
         ax.legend(fontsize=8, loc="upper right")
 
-    axes[1].set_xlabel("time within one CR half (ns)")
-    axes[0].set_title(f"Looped GRAPE seed vs optimized average — {parent.name}")
+    axes[1].set_xlabel(
+        f"time within one CR half (ns)  |  held at n_sub={n_sub}  "
+        f"(dt_sub={dt / n_sub:g} ns)"
+    )
+    axes[0].set_title(
+        f"Looped GRAPE seed vs optimized average — {parent.name} "
+        f"(each sample held ×{n_sub})"
+    )
     fig.text(0.99, 0.005, "blue=rise  orange=flat  purple=fall", ha="right",
              va="bottom", fontsize=8, color="0.45")
     plt.tight_layout(rect=(0, 0.03, 1, 1))

@@ -29,7 +29,7 @@ N_LINK_SAMPLES = 8
 
 # Two-detuning setup. ZZ_SHIFT_MHZ expands to +/- ZZ_SHIFT_MHZ/2.
 # Set SHIFTS_MHZ to an explicit pair to override (e.g. [-0.15, 0.05]).
-ZZ_SHIFT_MHZ = 0.1824
+ZZ_SHIFT_MHZ = 0.3
 SHIFTS_MHZ = None
 WEIGHTS = (0.5, 0.5)
 
@@ -43,7 +43,7 @@ SPREAD_PENALTY_LAMBDA = 0.3
 TARGET_GATE = None  # inferred from seed; or "zx_90" / "zx_m90"
 AMP_BOUND_MHZ = 48.0
 MAXITER = 80
-OPTIMIZE = True  # set False for a fast seed-only check
+OPTIMIZE = False  # set False for a fast seed-only check
 
 
 def run_robust_cr_grape() -> None:

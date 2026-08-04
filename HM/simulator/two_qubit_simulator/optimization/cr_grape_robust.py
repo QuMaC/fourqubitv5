@@ -32,6 +32,8 @@ from tqdm import tqdm
 
 from HM.simulator.two_qubit_simulator.engine.pulses import (
     assemble_cr_half_from_flat_knobs,
+    expand_samples_held_nsub,
+    scale_sample_index,
     seed_flat_knobs_from_calibrated_cr,
 )
 from HM.simulator.two_qubit_simulator.experiments.cr_len_sweep import CR_len_sweep
@@ -354,25 +356,34 @@ class RobustGrapeResult:
 
     def plot_waveform(self, out_png: str) -> None:
         dt = self.exps[0].dt_sample_ns if self.exps else 1.0
-        t = np.arange(len(self.cr_half_opt), dtype=float) * dt
+        n_sub = int(self.exps[0].simulator.n_sub) if self.exps else 2
         rs, re = self.half_slices["rise"]
         fs, fe = self.half_slices["flat"]
         ds, de = self.half_slices["fall"]
 
+        t, seed_exp = expand_samples_held_nsub(self.cr_half_seed, dt, n_sub)
+        _, opt_exp = expand_samples_held_nsub(self.cr_half_opt, dt, n_sub)
+        rs_e, re_e = scale_sample_index(rs, n_sub), scale_sample_index(re, n_sub)
+        fs_e, fe_e = scale_sample_index(fs, n_sub), scale_sample_index(fe, n_sub)
+        ds_e, de_e = scale_sample_index(ds, n_sub), scale_sample_index(de, n_sub)
+
         fig, axes = plt.subplots(2, 1, figsize=(10, 6.5), sharex=True)
         for ax, key in zip(axes, ("I", "Q")):
-            seed_y = self.cr_half_seed.real if key == "I" else self.cr_half_seed.imag
-            opt_y = self.cr_half_opt.real if key == "I" else self.cr_half_opt.imag
+            seed_y = seed_exp.real if key == "I" else seed_exp.imag
+            opt_y = opt_exp.real if key == "I" else opt_exp.imag
             ax.plot(t, seed_y, color="0.65", lw=1.2, ls="--", label=f"seed {key} (MHz)")
             ax.plot(t, opt_y, color="tab:green", lw=1.6, label=f"opt {key} (MHz)")
-            ax.axvspan(t[rs], t[re - 1] if re > rs else t[rs], color="tab:blue", alpha=0.08)
-            ax.axvspan(t[fs], t[fe - 1] if fe > fs else t[fs], color="tab:orange", alpha=0.08)
-            ax.axvspan(t[ds], t[de - 1] if de > ds else t[ds], color="tab:purple", alpha=0.08)
+            ax.axvspan(t[rs_e], t[re_e - 1] if re_e > rs_e else t[rs_e], color="tab:blue", alpha=0.08)
+            ax.axvspan(t[fs_e], t[fe_e - 1] if fe_e > fs_e else t[fs_e], color="tab:orange", alpha=0.08)
+            ax.axvspan(t[ds_e], t[de_e - 1] if de_e > ds_e else t[ds_e], color="tab:purple", alpha=0.08)
             ax.set_ylabel(f"{key} (MHz)")
             ax.grid(alpha=0.35)
             ax.legend(fontsize=8, loc="upper right")
 
-        axes[1].set_xlabel("time within one CR half (ns)")
+        axes[1].set_xlabel(
+            f"time within one CR half (ns)  |  held at n_sub={n_sub}  "
+            f"(dt_sub={dt / n_sub:g} ns)"
+        )
         sa, sb = self.shifts_mhz
         s = self.seed_metrics
         f = self.final_metrics
@@ -385,7 +396,10 @@ class RobustGrapeResult:
             f"F_a({sa:+.4g})={f['process_fidelity_a']:.5f}   "
             f"F_b({sb:+.4g})={f['process_fidelity_b']:.5f}"
         )
-        axes[0].set_title("Robust CR half: seed vs optimized (shaded: rise / flat / fall)")
+        axes[0].set_title(
+            "Robust CR half: seed vs optimized "
+            f"(shaded: rise / flat / fall; each sample held ×{n_sub})"
+        )
         fig.text(0.01, 0.005, summary, ha="left", va="bottom", fontsize=8,
                  family="monospace", color="0.15")
         fig.text(0.99, 0.005, "blue=rise  orange=flat  purple=fall", ha="right",
@@ -421,6 +435,7 @@ class RobustCRGrapeOptimizer:
         self,
         config: RobustCRGrapeConfig,
         exps: list[CR_len_sweep] | None = None,
+        flat_knobs_seed: np.ndarray | None = None,
     ):
         self.config = config
         self.shifts = config.resolved_shifts()
@@ -439,14 +454,23 @@ class RobustCRGrapeOptimizer:
 
         self.dt = self.exps[0].dt_sample_ns
 
-        self.flat_knobs_seed = seed_flat_knobs_from_calibrated_cr(
-            n_flat_knobs=config.n_flat_knobs,
-            flat_len_ns=config.flat_len_ns,
-            amp_mhz=config.seed_amp_mhz,
-            phase_rad=config.seed_phase_rad,
-            t_rise_ns=config.t_rise_ns,
-            dt_ns=self.dt,
-        )
+        if flat_knobs_seed is not None:
+            knobs = np.asarray(flat_knobs_seed, dtype=complex).reshape(-1)
+            if knobs.size != config.n_flat_knobs:
+                raise ValueError(
+                    f"flat_knobs_seed length {knobs.size} != "
+                    f"n_flat_knobs={config.n_flat_knobs}"
+                )
+            self.flat_knobs_seed = knobs
+        else:
+            self.flat_knobs_seed = seed_flat_knobs_from_calibrated_cr(
+                n_flat_knobs=config.n_flat_knobs,
+                flat_len_ns=config.flat_len_ns,
+                amp_mhz=config.seed_amp_mhz,
+                phase_rad=config.seed_phase_rad,
+                t_rise_ns=config.t_rise_ns,
+                dt_ns=self.dt,
+            )
         self.cr_half_seed, self.half_slices = assemble_cr_half_from_flat_knobs(
             self.flat_knobs_seed,
             flat_len_ns=config.flat_len_ns,
