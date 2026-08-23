@@ -20,8 +20,8 @@ GPU / batching
 --------------
 Install ``jax[cuda]`` and the same code runs on GPU. ``run_propagator`` uses
 ``dq.sepropagator``; batched initial states in ``run_shot`` batch over the
-Schödinger solves. Enable ``jax_enable_x64`` via constructor kwarg for parity
-with double-precision QuTiP runs.
+Schödinger solves. Double precision is set at import
+(``dq.set_precision("double")``), not per instance.
 """
 
 from __future__ import annotations
@@ -30,7 +30,6 @@ from typing import TYPE_CHECKING, Any, Sequence
 
 import dynamiqs as dq
 from dynamiqs import method as dq_method
-import jax
 import jax.numpy as jnp
 import numpy as np
 
@@ -42,6 +41,11 @@ if TYPE_CHECKING:
         Qubit,
     )
 
+def _configure_jax() -> None:
+    dq.set_precision("double")
+    dq.set_progress_meter(False)
+
+_configure_jax()
 
 class _DynamiqsState:
     """Thin wrapper so experiment code can call ``state.full()`` like QuTiP."""
@@ -71,12 +75,18 @@ class TwoQubitPulseSimulatorDynamiqs:
         dt_sample_ns: float = DT_SAMPLE_NS,
         enable_x64: bool = True,
         progress_meter: bool = False,
-        integrator_tol: float = 1e-9,
+        integrator_tol: float = 1e-10,
+        integrator_max_steps: int = 1_000_000,
     ):
         assert len(qubits) == 2, "this sim is hard-wired to 2 qubits"
-        if enable_x64:
-            jax.config.update("jax_enable_x64", True)
-
+        # Precision is set at import by _configure_jax() (dq.set_precision
+        # "double"). Do not toggle jax_enable_x64 here: it is too late if any
+        # JAX arrays already exist, and it fights the process-wide default.
+        if not enable_x64:
+            raise ValueError(
+                "enable_x64=False is not supported; dynamiqs engine is always "
+                "double precision (see _configure_jax). Omit this kwarg."
+            )
         self.qubits = list(qubits)
         self.J_MHz = J_MHz
         self.drive_lines = {dl.name: dl for dl in drive_lines}
@@ -86,7 +96,7 @@ class TwoQubitPulseSimulatorDynamiqs:
         self.dt_sample_us = self.dt_sample_ns * 1e-3
         self.dims = [q.n_levels for q in qubits]
         self.dim = self.dims[0] * self.dims[1]
-        self.delta_qq_MHz = self.qubits[0].frame_MHz - self.qubits[1].frame_MHz
+        self.set_target_frame(self.qubits[1].frame_MHz)
         self.comp_idx = [0, 1, self.dims[1], self.dims[1] + 1]
         self.channel_names = list(self.drive_lines.keys())
         self._sesolve_options = dq.Options(progress_meter=progress_meter)
@@ -97,18 +107,43 @@ class TwoQubitPulseSimulatorDynamiqs:
         self._integrator_method = dq_method.Tsit5(
             atol=integrator_tol,
             rtol=integrator_tol,
+            max_steps=integrator_max_steps,
         )
+        self.gradient = dq.gradient.BackwardCheckpointed()
         self._build_operators()
+
+    def set_target_frame(self, frame1):
+        """Install target rotating-frame frequency (float or length-2 jax array).
+
+        Lab GRAPE: pass a Python float.
+        Robust GRAPE: pass lab_f1 + jnp.asarray([+s, -s]) once before optimize.
+        """
+        # Keep jax arrays as jax arrays so coupling / drive coeffs batch.
+        if hasattr(frame1, "shape") and getattr(frame1, "ndim", 0) > 0:
+            frame1 = jnp.asarray(frame1, dtype=jnp.float64)
+            if frame1.shape != (2,):
+                raise ValueError(
+                    f"batched set_target_frame expects shape (2,), got {frame1.shape}"
+                )
+        else:
+            frame1 = float(frame1)
+
+        self.qubits[1].frame_MHz = frame1
+        # frame0 stays a lab scalar; broadcast against length-2 frame1
+        self.delta_qq_MHz = jnp.asarray(self.qubits[0].frame_MHz) - frame1
 
     def _build_operators(self) -> None:
         n0, n1 = self.dims
-        a0_local, a1_local = dq.destroy(n0), dq.destroy(n1)
-        I0, I1 = jnp.eye(n0), jnp.eye(n1)
+        # a0_local, a1_local = dq.destroy(n0), dq.destroy(n1)
+        # I0, I1 = jnp.eye(n0), jnp.eye(n1)
 
-        a0 = jnp.kron(dq.to_jax(a0_local), I1)
-        a1 = jnp.kron(I0, dq.to_jax(a1_local))
+        # a0 = jnp.kron(dq.to_jax(a0_local), I1)
+        # a1 = jnp.kron(I0, dq.to_jax(a1_local))
+        # self.a = [a0, a1]
+        # self.ad = [op.conj().T for op in self.a]
+        a0, a1 = dq.destroy(*self.dims)
         self.a = [a0, a1]
-        self.ad = [op.conj().T for op in self.a]
+        self.ad = [op.dag() for op in self.a]
 
         H_drift = jnp.zeros((self.dim, self.dim), dtype=complex)
         for q, qb in enumerate(self.qubits):
@@ -168,7 +203,8 @@ class TwoQubitPulseSimulatorDynamiqs:
         dt_us = self.dt_sample_us
 
         def sample_index(t: float) -> jnp.ndarray:
-            return jnp.minimum(jnp.int32(t / dt_us), n_eps - 1)
+            i = jnp.floor(t / dt_us).astype(jnp.int32)
+            return jnp.clip(i, 0, n_eps - 1)
 
         def coeff_ad(t: float) -> jnp.ndarray:
             eps = eps_arr[sample_index(t)]
@@ -196,11 +232,9 @@ class TwoQubitPulseSimulatorDynamiqs:
 
         H = self.H_drift + self._coupling_hamiltonian()
         for name in self.channel_names:
-            if name not in timeline:
-                continue
             eps_arr = jnp.array(timeline[name], dtype=complex)
-            if jnp.all(eps_arr == 0):
-                continue
+            # if jnp.all(eps_arr == 0):
+            #     continue
             H = H + self._drive_hamiltonian(name, eps_arr, discontinuity_ts)
         return H
 
@@ -246,6 +280,7 @@ class TwoQubitPulseSimulatorDynamiqs:
             y0,
             tsave,
             method=self._integrator_method,
+            gradient=self.gradient,
             options=self._sesolve_options,
         )
         psi_final = self._wrap_state(result.states[-1])
@@ -255,7 +290,7 @@ class TwoQubitPulseSimulatorDynamiqs:
             return psi_final, trajectory
         return psi_final
 
-    def run_propagator(self, timeline: dict[str, np.ndarray]) -> np.ndarray:
+    def run_propagator(self, timeline: dict[str, np.ndarray], return_numpy: bool = True):
         """Full Hilbert-space unitary via ``dq.sepropagator`` (JIT/GPU-friendly)."""
         L = self._validate_timeline(timeline)
         H = self._build_hamiltonian(timeline)
@@ -264,9 +299,13 @@ class TwoQubitPulseSimulatorDynamiqs:
             H,
             tsave,
             method=self._integrator_method,
+            gradient=self.gradient,
             options=self._seprop_options,
         )
-        return np.asarray(dq.to_jax(result.final_propagator))
+        if return_numpy:
+            return np.asarray(dq.to_jax(result.final_propagator))
+        else:
+            return dq.to_jax(result.final_propagator)
 
     def run_shot_batch(
         self,
@@ -290,6 +329,7 @@ class TwoQubitPulseSimulatorDynamiqs:
             y0,
             tsave,
             method=self._integrator_method,
+            gradient=self.gradient,
             options=self._sesolve_options,
         )
         return np.asarray(dq.to_jax(result.states[:, -1]))
@@ -329,3 +369,37 @@ class TwoQubitPulseSimulatorDynamiqs:
             "probs_measured": p,
         }
         return counts, info
+
+
+    def evolve_comp(self, timeline: dict) -> jnp.ndarray:
+        """Evolve computational basis kets ``00,01,10,11`` in one ``sesolve``.
+
+        Returns a JAX array (keeps the AD tape; no ``np.asarray``):
+
+        - ``(4, dim, 1)`` if ``delta_qq_MHz`` is a lab scalar
+        - ``(2, 4, dim, 1)`` if ``delta_qq_MHz`` has shape ``(2,)`` (robust batch)
+        """
+
+        L = self._validate_timeline(timeline)
+        H = self._build_hamiltonian(timeline)
+        psi0 = jnp.zeros((4, self.dim, 1), dtype=jnp.complex128)
+
+        for j, idx in enumerate(self.comp_idx):
+            psi0 = psi0.at[j, int(idx), 0].set(1.0)
+
+        y0 = dq.asqarray(psi0, dims=tuple(self.dims))
+
+        tsave = jnp.array([0.0, L * self.dt_sample_us])
+        result = dq.sesolve(
+            H, 
+            y0, 
+            tsave, 
+            method=self._integrator_method,
+            gradient=self.gradient,
+            options=self._sesolve_options,
+        )
+        
+        psi = dq.to_jax(result.final_state)
+        return psi
+
+
