@@ -245,6 +245,9 @@ class CR_len_sweep(TwoQubitSimulatorBase):
     def _propagator_from_timeline(self, timeline):
         """Assemble the joint Hilbert-space propagator by evolving each basis ket."""
         sim = self.simulator
+        run_U = getattr(sim, "run_propagator", None)
+        if callable(run_U):
+            return run_U(timeline)
         n0, n1 = sim.dims
         dim = n0 * n1
         U = np.zeros((dim, dim), dtype=complex)
@@ -684,7 +687,7 @@ def perform_cr_len_sweep(q_pair = [1,2], len_list = None, **kwargs):
 
 if __name__ == "__main__":
     cr_pulse_params = {
-        "amp_mhz": 32.0,
+        "amp_mhz": 21,
         "t_rise_ns": int(16),
         "t_flat_ns": None,
         # "phase_rad": np.round(np.pi/4, 4),
@@ -693,15 +696,15 @@ if __name__ == "__main__":
     }
     print(cr_pulse_params)
     n_levels = 3
-    file_suffix = f"amp_{cr_pulse_params['amp_mhz']}_t_rise_{cr_pulse_params['t_rise_ns']}_ph_{cr_pulse_params['phase_rad']}_n_levels_{n_levels}"
+    file_suffix = f"recreate_amp_{cr_pulse_params['amp_mhz']}_t_rise_{cr_pulse_params['t_rise_ns']}_ph_{cr_pulse_params['phase_rad']}_n_levels_{n_levels}"
     exp = perform_cr_len_sweep( 
                                 q_pair = [1,2],
-                                len_list = np.arange(0, 280, 5),
+                                len_list = np.arange(100, 130, 1),
                                 cr_pulse_params=cr_pulse_params,
                                 echoed_cr = True,
                                 parallel = True,
                                 max_workers=4,
-                                n_sub=2,
+                                n_sub=4,
                                 n_levels = n_levels,
                                 save_bloch_trajectory=True,
                                 bloch_trajectory_gif_filename=f"cr_len_sweep_bloch_trajectory_{file_suffix}.gif",
