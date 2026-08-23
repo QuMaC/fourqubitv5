@@ -13,9 +13,14 @@ import os
 import time
 from dataclasses import asdict, dataclass, field
 from typing import Any
+import matplotlib
 
+# Headless / long batch runs: TkAgg GC can abort with Tcl_AsyncDelete.
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+import jax
+import jax.numpy as jnp
 from scipy.optimize import minimize
 from tqdm import tqdm
 
@@ -24,6 +29,11 @@ from HM.simulator.two_qubit_simulator.engine.pulses import (
     expand_samples_held_nsub,
     scale_sample_index,
     seed_flat_knobs_from_calibrated_cr,
+)
+from HM.simulator.two_qubit_simulator.engine.pulses_jax import _templates_1ns
+from HM.simulator.two_qubit_simulator.optimization.grape_cost_jax import(
+    GrapeStatics,
+    grape_cost
 )
 from HM.simulator.two_qubit_simulator.experiments.cr_len_sweep import CR_len_sweep
 from HM.simulator.two_qubit_simulator.optimization.fidelity import (
@@ -92,9 +102,9 @@ def echoed_gate_duration_ns(
 class CRGrapeConfig:
     """User-facing GRAPE configuration."""
 
-    flat_len_ns: float = 184.0
-    n_flat_knobs: int = 46
-    seed_amp_mhz: float = -32.0
+    flat_len_ns: float = 122.0
+    n_flat_knobs: int = 61
+    seed_amp_mhz: float = -21.0
     seed_phase_rad: float = 2.724
     t_rise_ns: int = 16
     n_link_samples: int = 8
@@ -108,12 +118,49 @@ class CRGrapeConfig:
     log_every_eval: bool = False
     show_progress: bool = True
     results_dir: str | None = None
+    use_jax_grad: bool = False
+    """if true, use jax for gradient computation, l-bfgs-b or Adam"""
+    optimizer: str = "lbfgs"
+    """lbfgs-b or Adam"""
+    adam_lr: float = 0.02
+    adam_steps: int = 200
+
+    """ used only when optimizer = 'adam'"""
+
+    evolution: str = "comp"
+    """comp or full, comp is for computational subspace and full is for full dimension space"""
 
     def resolved_target_gate(self) -> str:
         if self.target_gate is not None:
             return str(self.target_gate)
         return _default_target_gate(self.seed_amp_mhz)
 
+
+def _build_grape_statics(opt: "CRGrapeOptimizer") -> GrapeStatics:
+    cfg = opt.config
+    sim = opt.exp.simulator
+    rise, fall = _templates_1ns(int(cfg.t_rise_ns))
+    n_flat = int(round(float(cfg.flat_len_ns) / float(opt.exp.dt_sample_ns)))
+    if n_flat % int(cfg.n_flat_knobs) != 0:
+        raise ValueError(
+            f"n_flat={n_flat} must be divisible by n_flat_knobs={cfg.n_flat_knobs}"
+        )
+    if abs(float(opt.exp.dt_sample_ns) - 1.0) > 1e-12:
+        raise ValueError("JAX GRAPE locks dt_sample_ns=1.0")
+
+    return GrapeStatics(
+        rise=rise,
+        fall=fall,
+        n_flat=n_flat,
+        n_link_samples=int(cfg.n_link_samples),
+        x_pi=jnp.asarray(opt._x_pi),
+        U_target_full=jnp.asarray(opt.u_target_full),
+        U_target_comp=jnp.asarray(opt.u_target_comp),
+        comp_indices=tuple(sim.comp_idx),
+        channel_names=("q1_drive", "q2_drive", "cr_drive"),
+        evolution=str(cfg.evolution),
+        leakage_weight=float(cfg.leakage_weight),
+    )
 
 @dataclass
 class GrapeResult:
@@ -333,6 +380,35 @@ class CRGrapeOptimizer:
         )
         self.u_target_comp = u_target_comp
 
+        ### Jax grape statics
+        self._jax_statics : GrapeStatics | None = None
+        self._cost_vg = None  # jitted (x,) -> (cost, grad)
+
+        eng = getattr(self.exp, "engine", None) or getattr(
+            self.exp.simulator, "__class__", type("x", (), {})
+        ).__name__
+        # Prefer an explicit flag on the experiment:
+        is_dynamiqs = type(self.exp.simulator).__name__.endswith("Dynamiqs")
+
+        if config.use_jax_grad:
+            if not is_dynamiqs:
+                raise ValueError(
+                    "use_jax_grad=True requires CR_len_sweep(..., engine='dynamiqs')"
+                )
+            if config.optimizer not in ("lbfgs", "adam"):
+                raise ValueError(f"unknown optimizer {config.optimizer!r}")
+            self._jax_statics = _build_grape_statics(self)
+            sim = self.exp.simulator
+            statics = self._jax_statics
+
+            def _cost_only(x):
+                return grape_cost(x, sim, statics)
+
+            # jit after first definition; first call compiles (slow once)
+            self._cost_vg = jax.jit(jax.value_and_grad(_cost_only))
+
+
+
         self.history: list[dict] = []
         self.eval_history: list[dict] = []
         self._iteration = 0
@@ -419,7 +495,59 @@ class CRGrapeOptimizer:
             )
         return cost
 
+    def _cost_and_grad(self, x: np.ndarray) -> tuple[float, np.ndarray]:
+        """ so scipy would end up caling the evolution twice if we had
+        minimize(self._cost_x, jac=self._jac_x), instead we can pass 
+        minimize(fun, x0, jac=True) but fun would have to return both cost and gradient"""
+        t0 = time.perf_counter()
+        x_j = jnp.asarray(x, dtype=jnp.float64)
+        c, g = self._cost_vg(x_j)
+        c_f = float(c)
+        g_np = np.asarray(g, dtype=float)
+        elapsed = time.perf_counter() - t0
+
+        # Lightweight log for eval_history (no second ODE if you skip rich metrics)
+        knobs = _x_to_knobs(x)
+        metrics = {
+            "process_fidelity": float(-c_f) if self.config.leakage_weight == 0.0 else float("nan"),
+            # When leakage_weight==0, cost = -F, so F = -cost.
+            "average_gate_fidelity": float("nan"),
+            "leakage": float("nan"),
+            "cost": c_f,
+            "target_gate": self.target_gate,
+            "elapsed_s": float(elapsed),
+            "u_max_mhz": float(np.max(np.abs(knobs))),
+            "eval": len(self.eval_history),
+            "backend": "jax_ad",
+        }
+        # Optional: fill rich metrics only every N evals — see section 7.
+        self.eval_history.append(metrics)
+        self._last_eval_metrics = metrics
+
+        if self._pbar is not None:
+            evals_this_iter = len(self.eval_history) - self._eval_at_iter_start
+            self._pbar.set_description(f"GRAPE iter {self._iteration} [jax]")
+            self._pbar.set_postfix(
+                eval_total=len(self.eval_history),
+                eval_iter=evals_this_iter,
+                cost=f"{c_f:.4f}",
+                sec=f"{elapsed:.1f}",
+                refresh=True,
+            )
+        elif self.config.log_every_eval:
+            print(f"  eval {metrics['eval']:4d}  cost={c_f:.5f}  ({elapsed:.1f}s)")
+
+        return c_f, g_np
+
     def _callback(self, x: np.ndarray) -> None:
+        if self.config.use_jax_grad:
+            # One NumPy-style forward for logging only (no grad)
+            knobs = _x_to_knobs(x)
+            _, metrics = self.cost_from_knobs(knobs)
+            metrics["eval"] = len(self.eval_history)
+            self._last_eval_metrics = metrics
+        if self._last_eval_metrics is None:
+            return
         if self._last_eval_metrics is None:
             return
         row = {"iteration": self._iteration, **_last_eval_metrics_copy(self._last_eval_metrics)}
@@ -443,6 +571,56 @@ class CRGrapeOptimizer:
         self._iteration += 1
         self._eval_at_iter_start = len(self.eval_history)
 
+    def _run_adam(
+        self, x0: np.ndarray, bounds: list[tuple[float, float]]
+    ) -> np.ndarray:
+        """Run Adam optimization"""
+        import optax
+
+        lo = np.array([b[0] for b in bounds], dtype=float)
+        hi = np.array([b[1] for b in bounds], dtype=float)
+
+        x = jnp.asarray(x0, dtype=jnp.float64)
+        opt = optax.adam(self.config.adam_lr)
+        opt_state = opt.init(x)
+
+        print(
+            f"\nStarting Adam: steps={self.config.adam_steps}, lr={self.config.adam_lr}"
+        )
+        print("  Compiling first step...")
+
+        @jax.jit
+        def step(x, opt_state):
+            c, g = self._cost_vg(x)
+            updates, opt_state = opt.update(g, opt_state, x)
+            x = optax.apply_updates(x, updates)
+            x = jnp.clip(x, lo, hi)
+            return x, opt_state, c
+
+
+        x, opt_state, c = step(x, opt_state)
+
+        print(f"step 0 cost={float(c):.8f}")
+
+        history_every = max(1, self.config.adam_steps//20)
+        for i in range(1, int(self.config.adam_steps)):
+            x, opt_state, c = step(x, opt_state)
+            if i%history_every == 0 or i == self.config.adam_steps-1:
+                knobs = _x_to_knobs(np.asarray(x))
+                _, metrics = self.cost_from_knobs(knobs)
+                metrics["eval"] = len(self.eval_history)
+                metrics["cost"] = float(c)
+                self.eval_history.append(metrics)
+                self.history.append({
+                    "iteration": i,
+                    **_last_eval_metrics_copy(metrics)
+                })
+                print(
+                    f"  step {i:4d}  cost={float(c):.8f}  "
+                    f"F={metrics['process_fidelity']:.5f}"
+                )
+        return _x_to_knobs(np.asarray(x))
+
     def evaluate_seed(self) -> dict:
         _, metrics = self.cost_from_knobs(self.flat_knobs_seed)
         return metrics
@@ -460,38 +638,69 @@ class CRGrapeOptimizer:
             x0 = _knobs_to_x(self.flat_knobs_seed)
             bound = float(self.config.amp_bound_mhz)
             bounds = [(-bound, bound)] * x0.size
-            print(
-                f"\nStarting L-BFGS-B: {self.config.n_flat_knobs} flat knobs "
-                f"({x0.size} reals), maxiter={self.config.maxiter}"
-            )
-            print(
-                f"  Each scipy iter ≈ {self._n_reals + 1}+ evals "
-                f"(~{self._n_reals + 1} for finite-diff gradient, then line search). "
-                f"Iter 0 can take many minutes — watch eval_iter in the bar."
-            )
-            self._eval_at_iter_start = len(self.eval_history)
-            if self.config.show_progress:
-                self._pbar = tqdm(
-                    total=self.config.maxiter,
-                    desc="GRAPE",
-                    unit="iter",
-                    dynamic_ncols=True,
-                )
-            try:
-                scipy_result = minimize(
-                    self._cost_x,
-                    x0,
-                    method="L-BFGS-B",
-                    bounds=bounds,
-                    callback=self._callback,
-                    options={"maxiter": self.config.maxiter, "ftol": 1e-10},
-                )
-            finally:
-                if self._pbar is not None:
-                    self._pbar.close()
-                    self._pbar = None
-            flat_knobs_opt = _x_to_knobs(scipy_result.x)
-            print(f"\nOptimizer message: {scipy_result.message}")
+
+            if self.config.use_jax_grad and self.config.optimizer == "adam":
+                flat_knobs_opt = self._run_adam(x0, bounds)
+                scipy_result = None
+            else:
+                if self.config.use_jax_grad: #this defaults to lbfgs-b
+                    maxfun = int(self.config.maxiter*30)
+                    fun = self._cost_and_grad
+                    jac = True
+                    print(
+                        f"\nStarting L-BFGS-B + JAX AD: {self.config.n_flat_knobs} knobs "
+                        f"({x0.size} reals), maxiter={self.config.maxiter}, maxfun={maxfun}"
+                    )
+                    print("  Compiling / first value_and_grad may take several minutes...")
+                    _ = self._cost_and_grad(x0) #warm compile before minimize?
+                else:  
+                    
+                    
+                    maxfun = int(self.config.maxiter * (50 + 2 * self.config.n_flat_knobs))
+                    fun = self._cost_x
+                    jac = None
+                    print(
+                        f"\nStarting L-BFGS-B (FD grad): {self.config.n_flat_knobs} knobs "
+                        f"({x0.size} reals), maxiter={self.config.maxiter}, maxfun={maxfun}"
+                    )
+
+                    
+
+                    print(
+                        f"  Each scipy iter ≈ {self._n_reals + 1}+ evals "
+                        f"(~{self._n_reals + 1} for finite-diff gradient, then line search). "
+                        f"Iter 0 can take many minutes — watch eval_iter in the bar."
+                    )
+
+
+                    self._eval_at_iter_start = len(self.eval_history)
+                    if self.config.show_progress:
+                        self._pbar = tqdm(
+                            total=self.config.maxiter,
+                            desc="GRAPE",
+                            unit="iter",
+                            dynamic_ncols=True,
+                        )
+                try:
+                    scipy_result = minimize(
+                        fun,
+                        x0,
+                        method="L-BFGS-B",
+                        jac=jac,
+                        bounds=bounds,
+                        callback=self._callback,
+                        options={
+                            "maxiter": self.config.maxiter,
+                            "maxfun": maxfun,
+                            "ftol": 1e-15,
+                        },
+                    )
+                finally:
+                    if self._pbar is not None:
+                        self._pbar.close()
+                        self._pbar = None
+                flat_knobs_opt = _x_to_knobs(scipy_result.x)
+                print(f"\nOptimizer message: {scipy_result.message}")
         else:
             print("\noptimize=False: seed metrics only (no L-BFGS-B).")
 
@@ -550,6 +759,11 @@ def optimize_echoed_cr_grape(
     exp: CR_len_sweep | None = None,
     results_dir: str | None = None,
     save: bool = True,
+    use_jax_grad: bool = False,
+    optimizer: str = "lbfgs",
+    adam_lr: float = 0.02,
+    adam_steps: int = 200,
+    evolution: str = "comp",
 ) -> GrapeResult:
     """User-facing entry point for echoed CR GRAPE.
 
@@ -581,6 +795,11 @@ def optimize_echoed_cr_grape(
         optimize=optimize,
         log_every_eval=log_every_eval,
         results_dir=results_dir,
+        use_jax_grad=use_jax_grad,
+        optimizer=optimizer,
+        adam_lr=adam_lr,
+        adam_steps=adam_steps,
+        evolution=evolution,
     )
     optimizer = CRGrapeOptimizer(config, exp=exp)
     result = optimizer.run()
@@ -920,3 +1139,5 @@ def run_looped_grape(
     elif save:
         looped.save(results_dir, status="complete")
     return looped
+
+
