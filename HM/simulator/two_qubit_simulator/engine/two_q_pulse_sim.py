@@ -100,6 +100,20 @@ class TwoQubitPulseSimulator:
         self.dim = self.dims[0] * self.dims[1]
         self._build_operators()
 
+    def set_target_frame(self, frame1):
+        "Install a scalar target freq for the rotating frame of qubit index 1"
+
+        frame1_arr = np.asarray(frame1)
+        if frame1_arr.ndim >0 and frame1_arr.size !=1:
+            raise TypeError(
+                "frame1 must be a scalar frequency, not an array"
+                f"Qutip does not support jax batching. Pass a single float."
+            )
+        self.qubits[1].frame_MHz = float(frame1_arr)
+
+        self.delta_qq_MHz = self.qubits[0].frame_MHz - self.qubits[1].frame_MHz
+
+
     # -- static operator construction ---------------------------------------
     def _build_operators(self) -> None:
         n0, n1 = self.dims
@@ -123,7 +137,7 @@ class TwoQubitPulseSimulator:
         self.coupling_op_dag = self.coupling_op.dag()
         # qubit-qubit detuning IS the frame difference -- Delta falls out of
         # the frame choice, no need to pass it separately.
-        self.delta_qq_MHz = self.qubits[0].frame_MHz - self.qubits[1].frame_MHz
+        self.set_target_frame(self.qubits[1].frame_MHz)
 
         # computational subspace indices, ordered |00>,|01>,|10>,|11>
         self.comp_idx = [0, 1, n1, n1 + 1]
