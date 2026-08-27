@@ -9,30 +9,33 @@ from matplotlib import pyplot as plt
 from qualang_tools.analysis.discriminator import two_state_discriminator
 # from qm import generate_qua_script
 
-save_data = True
+save_data = False
 
 # rr_amp = 1.0
 # integ_len = 4000
 # update_config_rr(config, q_no, rr_no, rr_amp, integ_len)
 
-q_no = 3
-pi12 = True
+q_no = 1
+pi12 = False
 qe = f"q{q_no}"
 qe_12 = f"q12_{q_no}"
 rr = f"rr{q_no}"
 out = adc_mapping[rr]
-chunk_size = 20 # In no. of clck cycles (units of 4ns)
+chunk_size = 10 # In no. of clck cycles (units of 4ns)
 integ_len = integ_len_clk[str(q_no)]
 # integ_len = config[f'q{q_no}_ro_pulse']['length'] // 4
 arr_size = int(integ_len/chunk_size)
+print(arr_size)
+# exit()
+# integ_lens = np.arange(4*chunk_size, 4*integ_len + 2*chunk_size, 4*chunk_size)
 integ_lens = np.arange(4*chunk_size, 4*integ_len + 2*chunk_size, 4*chunk_size)
 n_runs = 1e4
-
+prefix = "final_zoomed_in_3"
 
 # ro_amp = ro_amp[str(q_no)]
-a_min = 0.01
-a_max = 0.28
-da = 0.01
+a_min = 0.1
+a_max = 0.8
+da = 0.005
 amps = np.arange(a_min, a_max + da/2, da)
 n_amps = amps.size
 # Set ro_amp to 1.0 in config
@@ -60,7 +63,7 @@ with program() as IQ_blobs:
     Q1 = declare(fixed, size=arr_size)
     Q1_st = declare_stream()
 
-    with for_(a, a_min, a < a_max + da / 2, a + da):
+    with for_each_(a, amps):
         with for_(n, 0, n < n_runs, n + 1):
 
             wait(rep_rate_clk, qe)
@@ -186,12 +189,56 @@ if save_data is True:
     file_saver_(fid_list_2d, file_name=__file__, suffix=f"Fidelity_AmpIntLen_2dSweep_q{q_no}", master_folder=ExpName, time_stamp=False, init_path="E:/Experiments")
 
 import seaborn as sns
+import os
 
-ax = plt.figure(figsize=(15, 10))
+fig, ax = plt.subplots(figsize=(15, 10))
 cmap = ['RdBu_r', 'YlGnBu', 'BuPu']
-ax = sns.heatmap(fid_list_2d, annot=False,
-                 xticklabels=np.round(1e-3*integ_lens, 2), yticklabels=np.round(amps, 4),
-                 cmap=cmap[0], vmin=50, vmax=100)
-ax.set(xlabel="Integration Length (us)", ylabel="Readout Amplitude (a.u.)", title="Readout Fidelity Optimisation")
-ax.highlight = [[46, 42], [34, 10]]
+min_fid = fid_list_2d.min()
+min_fid = 85
+try:
+    ax = sns.heatmap(
+        fid_list_2d,
+        annot=False,
+        xticklabels=np.round(1e-3 * integ_lens, 2),
+        yticklabels=np.round(amps, 4),
+        cmap=cmap[0],
+        vmin=min_fid,
+        vmax=fid_list_2d.max(),
+        ax=ax,
+    )
+except Exception as e:
+    print(f"Error: {e}")
+    ax = sns.heatmap(
+        fid_list_2d,
+        annot=False,
+        xticklabels=np.round(1e-3 * integ_lens, 2),
+        yticklabels=np.round(amps, 4),
+        cmap=cmap[0],
+        vmin=70,
+        vmax=100,
+        ax=ax,
+    )
+ax.set(xlabel="Integration Length (us)", ylabel="Readout Amplitude (a.u.)", title=f"Readout Fidelity Optimisation (q{q_no})")
+
+# Mark and print best fidelity point
+best_row, best_col = np.unravel_index(np.nanargmax(fid_list_2d), fid_list_2d.shape)
+best_fid = float(fid_list_2d[best_row, best_col])
+best_amp = float(amps[best_row])
+best_integ_len_ns = float(integ_lens[best_col])
+best_integ_len_us = best_integ_len_ns * 1e-3
+best_integ_len_clk = best_integ_len_ns // 4
+print(
+    f"Best fidelity: {best_fid:.3f}% at amp={best_amp:.6g}, "
+    f"integ_len={best_integ_len_ns:.0f} ns ({best_integ_len_us:.3f} us = {best_integ_len_clk:.0f} clk)"
+)
+ax.scatter(best_col + 0.5, best_row + 0.5, marker="x", s=180, c="k", linewidths=2)
+
+fig.tight_layout()
+out_base = os.path.join(os.path.dirname(__file__), f"{prefix}ro_fidelity_amp_vs_integ_len_q{q_no}")
+pdf_path = out_base + ".pdf"
+svg_path = out_base + ".svg"
+fig.savefig(pdf_path, bbox_inches="tight")
+fig.savefig(svg_path, bbox_inches="tight")
+print(f"Figure saved: {pdf_path}")
+print(f"Figure saved: {svg_path}")
 plt.show()

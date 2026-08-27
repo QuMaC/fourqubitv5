@@ -1,0 +1,50 @@
+{
+    "q1": {
+        "offset": -110.342,
+        "sideband": -93.855
+    },
+    "rr1": {
+        "offset": -104.788,
+        "sideband": -57.335
+    },
+    "q2": {
+        "offset": -102.49,
+        "sideband": -95.035
+    },
+    "rr2": {
+        "offset": -100.794,
+        "sideband": -102.692
+    },
+    "q3": {
+        "offset": -105.692,
+        "sideband": -93.782
+    },
+    "rr3": {
+        "offset": -102.68,
+        "sideband": -89.977
+    },
+    "q4": {
+        "offset": -108.837,
+        "sideband": -97.727
+    },
+    "rr4": {
+        "offset": -110.936,
+        "sideband": -91.553
+    },
+    "q5": {
+        "offset": -98.302,
+        "sideband": -90.535
+    },
+    "rr5": {
+        "offset": -104.946,
+        "sideband": -87.923
+    },
+    "q6": {
+        "offset": -105.644,
+        "sideband": -93.26
+    },
+    "rr6": {
+        "offset": -108.674,
+        "sideband": -92.662
+    }
+}

@@ -17,12 +17,12 @@ from datetime import datetime
 import json
 
 simulate = False
-save_data = False
-time_stamp = False
+save_data = True
+time_stamp = True
 pi_12 = True
 plot_rabi = False
 plot_local = True
-update_calib = False
+update_calib = True
 ###################
 # The QUA program #
 ###################
@@ -37,7 +37,7 @@ t_max = int(t_max_ns / 4)
 dt = int(dt_ns / 4)
 t_list = np.arange(t_min, t_max, dt)
 
-c_no, t_no = 5, 4
+c_no, t_no = 1, 4
 
 CR_data = []
 

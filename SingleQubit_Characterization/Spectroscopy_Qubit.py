@@ -15,7 +15,7 @@ simulate = False
 ###################
 # The QUA program #
 ##################
-q_no = 4
+q_no = 5
 qe = f"q{q_no}"
 rr = f"rr{q_no}"
 # rr="rr1"
@@ -92,6 +92,7 @@ if simulate:
 #############
 qm = qmm.open_qm(config)
 job = qm.execute(qubit_spec)
+print(job.execution_report())
 res_handles = job.result_handles
 I_handle = job.result_handles.get("I")
 Q_handle = job.result_handles.get("Q")

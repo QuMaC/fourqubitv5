@@ -1,10 +1,31 @@
 import numpy as np
 
 
-def smooth_filter(data, window):  # moving_average_numpy
+def smooth_filter(data, window, mode: str = "full"):  # moving_average_numpy
+    """
+    Simple moving-average smoothing via convolution.
+
+    Notes on output length:
+    - mode="full": returns len(data) + window - 1 samples (legacy behavior in this repo)
+    - mode="same": returns len(data) samples (often what you want for pointwise operations)
+    - mode="valid": returns len(data) - window + 1 samples
+    """
+    if window is None:
+        raise ValueError("window must be an int >= 1")
+    window = int(window)
+    if window < 1:
+        raise ValueError("window must be an int >= 1")
+
+    data = np.asarray(data)
+    if data.size == 0:
+        return data.copy()
+
     weights = np.repeat(1.0, window) / window
-    k = np.convolve(data, weights, mode='full')
-    return k
+    if mode not in {"full", "same", "valid"}:
+        raise ValueError(f"Invalid mode={mode!r}. Expected 'full', 'same', or 'valid'.")
+    res = np.convolve(data, weights, mode=mode)
+
+    return res
 
 
 def does_signal_exist(sig, alpha=1):
@@ -150,3 +171,25 @@ def find_nearest(array, value):
     array = np.asarray(array)
     idx = (np.abs(array - value)).argmin()
     return array[idx], idx
+
+
+def get_sweep_array(sweep_span_MHz, sweep_npts, sweep_method=None, custom_spacing=None):
+    if custom_spacing is not None:
+        sweep_method = "custom"
+    if sweep_method == "linear":
+        return np.linspace(-sweep_span_MHz/2, sweep_span_MHz/2, sweep_npts)
+    elif sweep_method == "quadratic":
+    # Quadratic spacing centered on 0, denser in the middle
+        x = np.linspace(-1, 1, sweep_npts)
+        # Quadratic profile, denser near 0
+        sweep = (x ** 2) * np.sign(x)
+        sweep = sweep / np.max(np.abs(sweep))  # scale to range [-1, 1]
+        sweep = sweep * (sweep_span_MHz / 2)
+        return sweep
+    elif sweep_method == "custom":
+        #need to interpolate the custom spacing to match the sweep_npts
+        #need to then convert the custom spacing to the span with value +1 to -1
+        pass
+
+    else:
+        raise ValueError(f"Invalid sweep method: {sweep_method}")

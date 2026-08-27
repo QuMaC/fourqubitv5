@@ -1,8 +1,13 @@
+from pathlib import Path
+
 from qm.qua import *
 import numpy as np
 from Helper_Functions.macros import *
 
-cayley_table = np.int_(np.genfromtxt('../Configuration_Files/Resources/c1_cayley_table.csv', delimiter=','))[1:, 1:]
+_RB_ROOT = Path(__file__).resolve().parent.parent
+_CAYLEY_CSV = _RB_ROOT / "Configuration_Files" / "Resources" / "c1_cayley_table.csv"
+_cayley_raw = np.genfromtxt(_CAYLEY_CSV, delimiter=",")
+cayley_table = np.asarray(_cayley_raw[1:, 1:], dtype=np.int64)
 inv_gates = [int(np.where(cayley_table[i, :] == 0)[0][0]) for i in range(24)]
 
 def generate_sequence(max_circuit_depth, seed):

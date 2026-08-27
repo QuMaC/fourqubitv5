@@ -9,7 +9,6 @@ matplotlib.use('Qt5Agg')
 from matplotlib import pyplot as plt
 from Helper_Functions.macros import *
 from scipy.optimize import curve_fit
-import sys
 import pyvisa as visa
 
 ###################
@@ -20,7 +19,7 @@ save_data = False
 simulate = False
 check_e_delay = False
 
-rr_no = 8
+rr_no = 1
 q_no = rr_no
 rr = f"rr{rr_no}"
 out = adc_mapping[rr]
@@ -190,7 +189,7 @@ plt.xlabel("Frequency (GHz)")
 plt.title(f'Cavity Spectroscopy (Phase) : Cavity Frequency = {f_res} GHz')
 plt.axvline(x=f_res, linestyle = "--")
 plt.grid()
-plt.show(block=False)
+plt.show(block=True)
 
 if not check_e_delay:
     plt.figure()
@@ -201,7 +200,7 @@ if not check_e_delay:
     plt.axvline(x=f_res, linestyle = "--")
     plt.grid()
     plt.legend()
-    plt.show(block=False)
+    plt.show(block=True)
 
     plt.figure()
     plt.plot(freq_list1, np.abs(sig))
@@ -209,7 +208,7 @@ if not check_e_delay:
     plt.xlabel("Frequency (GHz)")
     plt.axvline(x=f_res, linestyle="--")
     plt.grid()
-    plt.show(block=False)
+    plt.show(block=True)
 
 data = np.transpose([freq_list1, phase1, real1, imag1, np.abs(sig)])
 

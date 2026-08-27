@@ -130,9 +130,10 @@ for q_no in q_list:
             rdout_phases = json.load(f)
             f.close()
 
-        n_angle = rdout_phases[f'rr{q_no}'] + (-1 * angle * 180 / np.pi)
-
-        rdout_phases[f'rr{q_no}'] = np.round(n_angle % 360, 3)
+        prev_angle = rdout_phases[f'rr{q_no}'] % 360
+        correction = -1 * angle * 180 / np.pi
+        n_angle    = (prev_angle + correction) % 360
+        rdout_phases[f'rr{q_no}'] = np.round(n_angle, 3)
 
         with open('../Configuration_Files/Readout_Settings/optimal_readout_phase.json', 'w') as f:
             json.dump(rdout_phases, f, indent=6)

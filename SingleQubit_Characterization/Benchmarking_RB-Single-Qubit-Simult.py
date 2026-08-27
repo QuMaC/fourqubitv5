@@ -1,3 +1,12 @@
+"""Run from this folder or anywhere: repo root is added to sys.path from __file__."""
+import sys
+from pathlib import Path
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_rs = str(_REPO_ROOT)
+if _rs not in sys.path:
+    sys.path.insert(0, _rs)
+
 from qm import SimulationConfig
 from qm import QuantumMachinesManager
 from Configuration_Files.configuration_4qubitsv3 import *
@@ -5,7 +14,23 @@ import numpy as np
 from matplotlib import pyplot as plt
 from qm.qua import *
 from scipy.optimize import curve_fit
-from Helper_Functions.macros import measure_macro
+import time
+
+try:
+    from tqdm.auto import tqdm
+except ImportError:
+    tqdm = None
+
+from Helper_Functions.helper_functionsv2 import Halted, file_saver_
+from Helper_Functions.macros import (
+    measure_macro,
+    play_X180,
+    play_X90,
+    play_Y180,
+    play_Y90,
+    play_mX90,
+    play_mY90,
+)
 
 qmm = QuantumMachinesManager(qm_ip, cluster_name=cluster_name)
 
@@ -29,8 +54,12 @@ dem2 = demarcations[str(q2_no)]
 
 simulate = False
 lsb = False
+# Progress bar while the OPX program runs (per-shot counter streamed to host).
+SHOW_PROGRESS = True
 
-cayley_table = np.int_(np.genfromtxt('../Configuration_Files/Resources/c1_cayley_table.csv', delimiter=','))[1:, 1:]
+_CAYLEY_CSV = _REPO_ROOT / "Configuration_Files" / "Resources" / "c1_cayley_table.csv"
+_cayley_raw = np.genfromtxt(_CAYLEY_CSV, delimiter=",")
+cayley_table = np.asarray(_cayley_raw[1:, 1:], dtype=np.int64)
 inv_gates = [int(np.where(cayley_table[i, :] == 0)[0][0]) for i in range(24)]
 max_circuit_depth = 400 #180
 delta_depth = 1  # must be 1!!
@@ -135,15 +164,20 @@ def play_sequence(qe, sequence_list, depth):
 
         # wait(4, qe)
 
-if simulate :
+if simulate:
     wait_init = 100
     avgs = 3
+
+_total_rb_shots = num_of_sequences * max_circuit_depth * avgs
 
 with program() as rb:
     depth = declare(int)
     saved_gate = declare(int)
     m = declare(int)
     n = declare(int)
+    shot_i = declare(int)
+    shot_i_st = declare_stream()
+    assign(shot_i, 0)
     res1 = declare(bool)
     res1_st = declare_stream()
     res2 = declare(bool)
@@ -190,7 +224,11 @@ with program() as rb:
 
                 assign(sequence_list[depth], saved_gate)
 
+                assign(shot_i, shot_i + 1)
+                save(shot_i, shot_i_st)
+
     with stream_processing():
+        shot_i_st.save_all("shot_progress")
         res1_st.boolean_to_int().buffer(avgs).map(FUNCTIONS.average()).buffer(num_of_sequences, max_circuit_depth).save('res1')
         res2_st.boolean_to_int().buffer(avgs).map(FUNCTIONS.average()).buffer(num_of_sequences, max_circuit_depth).save('res2')
 
@@ -216,11 +254,46 @@ if simulate:
     raise Halted()
 
 
+def _progress_last(raw):
+    if raw is None:
+        return None
+    if isinstance(raw, dict) and "value" in raw:
+        raw = raw["value"]
+    arr = np.asarray(raw).reshape(-1)
+    if arr.size == 0:
+        return None
+    return int(arr[-1])
+
+
 job = qm.execute(rb, duration_limit=0, data_limit=0)
 
-############
-# analysis #
-############
+if SHOW_PROGRESS:
+    try:
+        from qualang_tools.results import fetching_tool
+    except ImportError:
+        fetching_tool = None
+
+    if fetching_tool is not None and tqdm is not None:
+        results = fetching_tool(job, data_list=["shot_progress"], mode="live")
+        pbar = tqdm(total=_total_rb_shots, desc="Simultaneous RB", unit="shot")
+        try:
+            while results.is_processing():
+                shot_progress = results.fetch_all()[0]
+                last = _progress_last(shot_progress)
+                if last is not None:
+                    pbar.n = min(last, _total_rb_shots)
+                    pbar.refresh()
+                else:
+                    time.sleep(0.05)
+        finally:
+            pbar.close()
+    elif tqdm is not None:
+        pbar = tqdm(total=None, desc="Simultaneous RB (running…)", bar_format="{desc} [{elapsed}]")
+        try:
+            while job.result_handles.is_processing():
+                time.sleep(0.25)
+        finally:
+            pbar.close()
 
 res_handles = job.result_handles
 res_handles.wait_for_all_values()
@@ -249,9 +322,11 @@ else:
 def power_law(m, a, b, p):
     return a * (p ** m) + b
 
-x=np.linspace(1,max_circuit_depth,max_circuit_depth)
+x = np.linspace(1, max_circuit_depth, max_circuit_depth)
 labels = [q1_no, q2_no]
-for i in range(2):
+
+_fit_loop = tqdm(range(2), desc="Fit & save qubits") if tqdm else range(2)
+for i in _fit_loop:
 
     pars, cov = curve_fit(f=power_law, xdata=x, ydata=avg_trace_values[i], p0=init_vals, bounds=(-np.inf, np.inf),
                           maxfev=2000)

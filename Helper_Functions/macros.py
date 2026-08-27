@@ -519,6 +519,32 @@ def measure_macro(qe, rr, out, I, Q, pi_12=False):
             demod.full("integW_cos", I, out),
             demod.full("integW_minus_sin", Q, out))
 
+
+def measure_macro_weight(qe, rr, out, I, Q, pi_12=False, weight_choice=None):
+    wait_rr = 4
+    qe12 = f"q12_{rr[-1]}"
+
+    if pi_12:
+        align(qe, qe12)
+        wait(4, qe12)
+        play('X180', qe12)
+        wait(wait_rr, rr)
+        align(qe12, rr)
+        wait(wait_rr, rr)
+    else:
+        align(qe, rr)
+        wait(wait_rr, rr)
+
+    if weight_choice == 'opt':
+        measure("readout", rr, None,
+            demod.full("optW_cos", I, out),
+            demod.full("optW_minus_sin", Q, out))
+    else:
+        measure("readout", rr, None,
+                demod.full("integW_cos", I, out),
+                demod.full("integW_minus_sin", Q, out))
+
+
 def measure_macro_no_ramp(qe, rr, out, I, Q, pi_12=False):
     wait_rr = 4
     qe12 = f"q12_{rr[-1]}"

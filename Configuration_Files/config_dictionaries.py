@@ -2,7 +2,8 @@ import json
 from Helper_Functions.helper_functionsv2 import *
 from qualang_tools.units import unit
 
-path_global = r"D:\QUA\Master_Scripts\fourqubitv5 (Under Construction)"
+path_global = r"D:\QUA\Master_Scripts\fourqubitv5_Hari"
+single_qubit_experiments_path = r"D:\QUA\Master_Scripts\fourqubitv5_Hari\HM\single_qubit_experiments"
 
 u = unit()
 n_qubits = 8
@@ -35,8 +36,23 @@ samples_per_chunk = 20
 chunks_per_window = 3
 arr_size = 10
 acc_data_width = 8
+#paramp status dictionary
+with open(path_global + '/Configuration_Files/Readout_Settings/paramp_status.json') as f:
+    paramp_status_dict = json.load(f)
+
+# Frequency dictionaries
+
+# Qubit-pair coupling values: zz_khz, J_mhz, total_det_mhz, f0/f1_mhz, T2star_0/1_us
+# Keys are "c{ctrl}_t{tgt}" (e.g. "c3_t2"); values are raw floats (not scaled).
+with open(path_global + '/Configuration_Files/System_Parameters/coupling_vals.json') as f:
+    coupling_vals = json.load(f)
 
 
+with open(path_global + '/Configuration_Files/System_Parameters/anharmonicities.json') as f:
+    anharmonicities = json.load(f)
+
+with open(path_global + '/Configuration_Files/System_Parameters/fq_vals.json') as f:
+    fq_vals = json.load(f)
 
 # Cross-Kerr shifts dictionary
 with open(path_global + '/Configuration_Files/System_Parameters/CrossKerr.json') as f:
@@ -104,6 +120,9 @@ with open(path_global + '/Configuration_Files/Readout_Settings/elec_delay_ns.jso
 
 with open(path_global + '/Configuration_Files/Readout_Settings/phase_offset_rad.json') as f:
     phase_offset_rad = json.load(f)
+
+with open(path_global + '/Configuration_Files/Readout_Settings/optimal_weights.json') as f:
+    opt_weights = json.load(f)
 
 # ==================Control Parameters===============================================
 

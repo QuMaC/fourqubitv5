@@ -1,0 +1,52 @@
+{
+    "qubits":{
+        "1":{
+            "sweep_span_MHz": 200,
+            "sweep_npts": 100,
+            "sweep_method": "linear",
+            "saturation_len": 5,
+            "saturation_amp": 0.1,
+            "n_avg": 1000
+        },
+        "2":{
+            "sweep_span_MHz": 200,
+            "sweep_npts": 100,
+            "sweep_method": "linear",
+            "saturation_len": 5,
+            "saturation_amp": 0.1,
+            "n_avg": 1000
+        },
+        "3":{
+            "sweep_span_MHz": 200,
+            "sweep_npts": 100,
+            "sweep_method": "linear",
+            "saturation_len": 5,
+            "saturation_amp": 0.1,
+            "n_avg": 1000
+        },
+        "4":{
+            "sweep_span_MHz": 200,
+            "sweep_npts": 100,
+            "sweep_method": "linear",
+            "saturation_len": 5,
+            "saturation_amp": 0.1,
+            "n_avg": 1000
+        },
+        "5":{
+            "sweep_span_MHz": 200,
+            "sweep_npts": 100,
+            "sweep_method": "linear",
+            "saturation_len": 5,
+            "saturation_amp": 0.1,
+            "n_avg": 1000
+        },
+        "6":{
+            "sweep_span_MHz": 200,
+            "sweep_npts": 100,
+            "sweep_method": "linear",
+            "saturation_len": 5,
+            "saturation_amp": 0.1,
+            "n_avg": 1000
+        }
+    }
+}

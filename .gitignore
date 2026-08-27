@@ -8,9 +8,17 @@ __pycache__/
 *.zip
 *.pdf
 *.png
-*.dll
 *.txt
+!requirements*.txt
 *joblib
 *.tcs
 *.bit
 
+HM/data_misc/*
+
+HM/Thesis/*
+paramp_hdawg/overnight_paramp_gain_tracker.py
+
+#added ignore for sim results
+HM/simulator/two_qubit_simulator/optimization/optimization_tests/results/*
+HM/simulator/two_qubit_simulator/sim_media/*

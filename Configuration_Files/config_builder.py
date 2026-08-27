@@ -1,5 +1,5 @@
 from Helper_Functions.helper_functionsv2 import *
-
+AC_AMP_FACTOR = 0.4
 
 def config_add_controller(config, con_no, dc_offsets, adc_offsets, gain_dict):
     if not "controllers" in config: config["controllers"] = {}
@@ -35,7 +35,7 @@ def config_add_common_elements(config):
                         }
 
     config["waveforms"] = {"zero_wf": {"type": "constant", "sample": 0.0},
-                           "const_wf": {"type": "constant", "sample": 0.4},
+                           "const_wf": {"type": "constant", "sample": AC_AMP_FACTOR},
                            }
 
     config["digital_waveforms"] = {"ON": {"samples": [(1, 0)]}}
@@ -46,7 +46,7 @@ def config_add_common_elements(config):
 def config_add_elements_q_rr(config, q_no, rr_no, dac_mapping, q_LO, q_IF, rr_LO, rr_IF, pi_len_ns, piby2_len_ns,
                              pi_rise_grft_ns, amp_scale,
                              mixers, mixer_corrections, ro_amp, ro_len_clk, tof, integ_len_clk, optimal_readout_phase,
-                             smearing=0):
+                             opt_weights=None, smearing=0):
     '''
     Given parameters, this function adds the qubit, readout resonator, and all the standard pulses and waveforms to the config.
     '''
@@ -167,7 +167,7 @@ def config_add_elements_q_rr(config, q_no, rr_no, dac_mapping, q_LO, q_IF, rr_LO
     ro_pulse_square = False
     if ro_pulse_square:
         config["waveforms"][f"q{rr_no}_ro_wf"] = {"type": "constant",
-                                                  "sample": 0.4 * ro_amp[str(rr_no)]}
+                                                  "sample": AC_AMP_FACTOR * ro_amp[str(rr_no)]}
 
 
     else:
@@ -201,6 +201,20 @@ def config_add_elements_q_rr(config, q_no, rr_no, dac_mapping, q_LO, q_IF, rr_LO
         (-np.sin(optimal_readout_phase[f"rr{rr_no}"]), integ_len_clk[f"{rr_no}"] * 4)]
     config["integration_weights"][f"integW_minus_sin_rr{rr_no}"]["sine"] = [
         (-np.cos(optimal_readout_phase[f"rr{rr_no}"]), integ_len_clk[f"{rr_no}"] * 4)]
+
+    if opt_weights is not None and f"rr{rr_no}" in opt_weights:
+        config["integration_weights"][f"optW_cos_rr{rr_no}"] = {
+            "cosine": [tuple(k) for k in opt_weights[f"rr{rr_no}"]["optW_cos"]],
+            "sine": [tuple(k) for k in opt_weights[f"rr{rr_no}"]["optW_minus_sin"]],
+        }
+        config["integration_weights"][f"optW_minus_sin_rr{rr_no}"] = {
+            "cosine": [tuple(k) for k in opt_weights[f"rr{rr_no}"]["optW_minus_sin"]],
+            "sine": [(-1*k[0], k[1]) for k in opt_weights[f"rr{rr_no}"]["optW_cos"]],
+        }
+
+        ro_pulse_name = config["elements"][f"rr{rr_no}"]["operations"]["readout"]
+        config["pulses"][ro_pulse_name]["integration_weights"]["optW_cos"] = f"optW_cos_rr{rr_no}"
+        config["pulses"][ro_pulse_name]["integration_weights"]["optW_minus_sin"] = f"optW_minus_sin_rr{rr_no}"
 
     # add mixers
     if not "mixers" in config: config["mixers"] = {}

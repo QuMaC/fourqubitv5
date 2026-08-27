@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import numpy as np
 import scipy.signal
@@ -165,10 +166,15 @@ def ramsey_fitting(tt, yy, init=False):
 
     c_init = (max(yy) + min(yy)) / 2
 
-    with open('../Configuration_Files/Pulse_Calibrations/upper_bound_coherence.json') as f:
+    _upper_bound_path = (
+        Path(__file__).resolve().parent.parent
+        / "Configuration_Files"
+        / "Pulse_Calibrations"
+        / "upper_bound_coherence.json"
+    )
+    with open(_upper_bound_path) as f:
         bound_dict = json.load(f)
-        upper = 3 * bound_dict['T1_upper']
-        f.close()
+        upper = 3 * bound_dict["T1_upper"]
 
     # peaks = scipy.signal.find_peaks(yy, distance=int(len(yy) / peak_freq_index[0][0])//2)
     #

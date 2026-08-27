@@ -1,0 +1,52 @@
+{
+    "resonators":{
+        "1":{
+            "sweep_span_MHz": 20,
+            "sweep_step_MHz": 1e-2,
+            "ro_len": 4000,
+            "integ_len": 4000,
+            "rr_amp": 0.01,
+            "n_avg": 2000
+        },
+        "2":{
+            "sweep_span_MHz": 20,
+            "sweep_step_MHz": 1e-2,
+            "ro_len": 4000,
+            "integ_len": 4000,
+            "rr_amp": 0.01,
+            "n_avg": 2000
+        },
+        "3":{
+            "sweep_span_MHz": 20,
+            "sweep_step_MHz": 1e-2,
+            "ro_len": 4000,
+            "integ_len": 4000,
+            "rr_amp": 0.01,
+            "n_avg": 2000
+        },
+        "4":{
+            "sweep_span_MHz": 20,
+            "sweep_step_MHz": 1e-2,
+            "ro_len": 4000,
+            "integ_len": 4000,
+            "rr_amp": 0.01,
+            "n_avg": 2000
+        },
+        "5":{
+            "sweep_span_MHz": 20,
+            "sweep_step_MHz": 1e-2,
+            "ro_len": 4000,
+            "integ_len": 4000,
+            "rr_amp": 0.01,
+            "n_avg": 2000
+        },
+        "6":{
+            "sweep_span_MHz": 20,
+            "sweep_step_MHz": 1e-2,
+            "ro_len": 4000,
+            "integ_len": 4000,
+            "rr_amp": 0.01,
+            "n_avg": 2000
+        }
+    }
+}
