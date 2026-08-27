@@ -13,9 +13,9 @@ from Helper_Functions.qua_program_funcs import *
 
 simulate = False
 save_data = True
-time_stamp = False
+time_stamp = True
 
-update_calib = False
+update_calib = True
 ###################
 # The QUA program #
 ###################
@@ -28,7 +28,7 @@ t_max = int(t_max_ns / 4)
 dt = int(dt_ns / 4)
 t_list = np.arange(t_min, t_max, dt)
 
-c_no, t_no = 5, 2
+c_no, t_no = 1, 2
 
 
 

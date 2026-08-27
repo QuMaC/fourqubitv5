@@ -2,11 +2,6 @@
 from hdawg_init import *
 import zhinst
 
-import sys
-import os
-
-sys.path.append(os.path.abspath('../'))
-
 import numpy as np
 import matplotlib.pyplot as plt
 import time

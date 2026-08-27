@@ -96,15 +96,15 @@ angle, threshold, fidelity, gg, ge, eg, ee = two_state_discriminator(I0, Q0, I1,
 
 with open(path_global + '/Configuration_Files/Readout_Settings/optimal_readout_phase.json', 'r') as f:
     rdout_phases = json.load(f)
-    f.close()
 
-n_angle = rdout_phases[f'rr{q_no}'] + (-1 * angle * 180 / np.pi)
-
-rdout_phases[f'rr{q_no}'] = n_angle
+prev_angle = rdout_phases[f'rr{q_no}'] % 360
+correction = -1 * angle * 180 / np.pi
+n_angle    = (prev_angle + correction) % 360
+rdout_phases[f'rr{q_no}'] = np.round(n_angle, 3)
+print(f"Readout phase rr{q_no}: {prev_angle:.3f}° + {correction:.3f}° → {n_angle:.3f}°")
 
 with open(path_global + '/Configuration_Files/Readout_Settings/optimal_readout_phase.json', 'w') as f:
     json.dump(rdout_phases, f, indent=6)
-    f.close()
 
 with open(path_global + '/Configuration_Files/Readout_Settings/demarcations.json', 'r') as f:
     demarks = json.load(f)

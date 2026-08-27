@@ -1,0 +1,21 @@
+# Recreate the hm-sim working env (exported from Software/envs/qumac-env).
+#
+#   conda env create -f environment.yml
+#   conda activate hm-sim-env
+#   pip install -e .
+#
+# Or pip-only on an existing Python 3.11 venv:
+#   pip install -r requirements-hm-sim.txt
+#   pip install -e .
+name: hm-sim-env
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - pip
+  - ipykernel
+  - ipython
+  - sympy
+  - pip:
+      - -r requirements-hm-sim.txt

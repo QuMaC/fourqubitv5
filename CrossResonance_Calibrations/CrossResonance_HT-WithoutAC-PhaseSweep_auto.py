@@ -21,10 +21,10 @@ import json
 simulate = False
 save_data = False
 time_stamp = False
-pi_12 = True
+pi_12 = False
 plot_rabi = False
 plot_local = True
-update_calib = False
+update_calib = True
 ###################
 # The QUA program #
 ###################
@@ -39,7 +39,7 @@ t_max = int(t_max_ns / 4)
 dt = int(dt_ns / 4)
 t_list = np.arange(t_min, t_max, dt)
 
-c_no, t_no = 5, 2
+c_no, t_no = 1, 2
 
 CR_data = []
 

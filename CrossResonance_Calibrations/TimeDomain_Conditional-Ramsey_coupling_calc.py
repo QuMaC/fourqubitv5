@@ -25,7 +25,7 @@ t_max = 5000 // 4
 dt = 4
 t_list = np.arange(t_min, t_max, dt)
 
-q_no_t, q_no_c = 5, 2
+q_no_t, q_no_c = 2, 1
 qubit_IF = q_IF[str(q_no_t)]
 det = 2.5  # in MHz
 qe_t = f"q{q_no_t}"
@@ -65,7 +65,7 @@ with program() as ramsey:
     t = declare(int)
 
     update_frequency(qe_t, qubit_IF + det * 1e6)
-    with for_(n, 0, n < 4000, n + 1):
+    with for_(n, 0, n < 200, n + 1):
         with for_(t, t_min, t < t_max, t + dt):
             if simulate: t = 100
 
@@ -176,6 +176,7 @@ if simulate:
 #############
 qm = qmm.open_qm(config)
 job = qm.execute(ramsey)
+print(job.execution_report())
 res_handles = job.result_handles
 I0_handle = job.result_handles.get("I0")
 Q0_handle = job.result_handles.get("Q0")
@@ -207,7 +208,6 @@ for i in range(2):
     ax[i].set_ylabel("Ramsey Amplitude")
     ax[i].grid()
     ax[i].legend()
-
 ax[1].set_xlabel("Time (us)")
 
 while res_handles.is_processing():
@@ -324,3 +324,4 @@ else:
     J = np.sqrt(-1 * J_sq)
 
 print(f'Coupling is {J * 1e-3:.3f} MHz')
+plt.show()

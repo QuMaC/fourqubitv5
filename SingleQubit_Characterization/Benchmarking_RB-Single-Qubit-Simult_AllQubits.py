@@ -1,11 +1,21 @@
-from qm import SimulationConfig
-from qm.QuantumMachinesManager import QuantumMachinesManager
-from configuration_4qubitsv3 import *
+import sys
+from pathlib import Path
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_rs = str(_REPO_ROOT)
+if _rs not in sys.path:
+    sys.path.insert(0, _rs)
+
+import numpy as np
 from matplotlib import pyplot as plt
+from qm import QuantumMachinesManager, SimulationConfig
 from qm.qua import *
 from scipy.optimize import curve_fit
-from macros import measure_macro
-from RB_helper_functions import *
+
+from Configuration_Files.configuration_4qubitsv3 import *
+from Helper_Functions.helper_functionsv2 import Halted, file_saver_
+from Helper_Functions.macros import measure_macro
+from Helper_Functions.RB_helper_functions import *
 
 n_iter = 100
 n_qubits = 6

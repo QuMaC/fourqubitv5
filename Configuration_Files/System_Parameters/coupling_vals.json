@@ -1,0 +1,110 @@
+{
+  "c1_t2": {
+    "zz_khz": 89.45,
+    "J_mhz": 3.216328,
+    "total_det_mhz": 0.1789,
+    "f0_mhz": 2.501487,
+    "f1_mhz": 2.322626,
+    "T2star_0_us": -625641673.151,
+    "T2star_1_us": 6.688
+  },
+  "c1_t4": {
+    "zz_khz": 87.25,
+    "J_mhz": 2.585113,
+    "total_det_mhz": 0.1745,
+    "f0_mhz": 2.491156,
+    "f1_mhz": 2.316644,
+    "T2star_0_us": -72625352.268,
+    "T2star_1_us": 7.703
+  },
+  "c1_t6": {
+    "zz_khz": 0.0,
+    "J_mhz": 0.0,
+    "total_det_mhz": 0.0,
+    "f0_mhz": 0.0,
+    "f1_mhz": 0.0,
+    "T2star_0_us": 0.0,
+    "T2star_1_us": 0.0
+  },
+  "c3_t2": {
+    "zz_khz": 97.3,
+    "J_mhz": 2.979116,
+    "total_det_mhz": 0.1946,
+    "f0_mhz": 2.492099,
+    "f1_mhz": 2.29746,
+    "T2star_0_us": -157337290.406,
+    "T2star_1_us": 6.539
+  },
+  "c3_t4": {
+    "zz_khz": 0.0,
+    "J_mhz": 0.0,
+    "total_det_mhz": 0.0,
+    "f0_mhz": 0.0,
+    "f1_mhz": 0.0,
+    "T2star_0_us": 0.0,
+    "T2star_1_us": 0.0
+  },
+  "c3_t6": {
+    "zz_khz": 0.0,
+    "J_mhz": 0.0,
+    "total_det_mhz": 0.0,
+    "f0_mhz": 0.0,
+    "f1_mhz": 0.0,
+    "T2star_0_us": 0.0,
+    "T2star_1_us": 0.0
+  },
+  "c5_t2": {
+    "zz_khz": 0.0,
+    "J_mhz": 0.0,
+    "total_det_mhz": 0.0,
+    "f0_mhz": 0.0,
+    "f1_mhz": 0.0,
+    "T2star_0_us": 0.0,
+    "T2star_1_us": 0.0
+  },
+  "c5_t4": {
+    "zz_khz": 0.0,
+    "J_mhz": 0.0,
+    "total_det_mhz": 0.0,
+    "f0_mhz": 0.0,
+    "f1_mhz": 0.0,
+    "T2star_0_us": 0.0,
+    "T2star_1_us": 0.0
+  },
+  "c5_t6": {
+    "zz_khz": 0.0,
+    "J_mhz": 0.0,
+    "total_det_mhz": 0.0,
+    "f0_mhz": 0.0,
+    "f1_mhz": 0.0,
+    "T2star_0_us": 0.0,
+    "T2star_1_us": 0.0
+  },
+  "c2_t3": {
+    "zz_khz": 94.35,
+    "J_mhz": 2.933607,
+    "total_det_mhz": 0.1887,
+    "f0_mhz": 2.498458,
+    "f1_mhz": 2.309777,
+    "T2star_0_us": -175748184.144,
+    "T2star_1_us": 4.092
+  },
+  "c4_t1": {
+    "zz_khz": 71.75,
+    "J_mhz": 2.344271,
+    "total_det_mhz": 0.1435,
+    "f0_mhz": 2.498106,
+    "f1_mhz": 2.354579,
+    "T2star_0_us": 2198774.721,
+    "T2star_1_us": 4.747
+  },
+  "c2_t1": {
+    "zz_khz": 87.15,
+    "J_mhz": 3.174708,
+    "total_det_mhz": 0.1743,
+    "f0_mhz": 2.493528,
+    "f1_mhz": 2.31924,
+    "T2star_0_us": -498613558.712,
+    "T2star_1_us": 6.155
+  }
+}

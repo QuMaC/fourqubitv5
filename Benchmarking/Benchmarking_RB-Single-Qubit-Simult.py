@@ -5,12 +5,20 @@ import numpy as np
 from matplotlib import pyplot as plt
 from qm.qua import *
 from scipy.optimize import curve_fit
-from Helper_Functions.macros import measure_macro
+from Helper_Functions.macros import (
+    measure_macro,
+    play_X180,
+    play_X90,
+    play_Y180,
+    play_Y90,
+    play_mX90,
+    play_mY90,
+)
 
 qmm = QuantumMachinesManager(qm_ip, cluster_name=cluster_name)
 
 pi_12 = False
-q1_no, q2_no = 3, 4
+q1_no, q2_no = 1, 4
 
 qe1 = f"q{q1_no}"
 rr1 = f"rr{q1_no}"
@@ -30,7 +38,8 @@ dem2 = demarcations[str(q2_no)]
 simulate = False
 lsb = False
 
-cayley_table = np.int_(np.genfromtxt('../Configuration_Files/Resources/c1_cayley_table.csv', delimiter=','))[1:, 1:]
+_cayley_raw = np.genfromtxt("../Configuration_Files/Resources/c1_cayley_table.csv", delimiter=",")
+cayley_table = np.asarray(_cayley_raw[1:, 1:], dtype=np.int64)
 inv_gates = [int(np.where(cayley_table[i, :] == 0)[0][0]) for i in range(24)]
 max_circuit_depth = 400 #180
 delta_depth = 1  # must be 1!!

@@ -43,7 +43,8 @@ sl_5_6 = '11502170036'
 
 sl_list = [sl_from_fridge, sl_to_fridge, sl_5_6]
 
-vna_opx_switch_map = {'112': {sl_list[0]: {'A': 0, 'D': 1, 'C': 0}, sl_list[1]: {'A': 0, 'D': 1, 'C': 0}, sl_list[2]: {'B': 1}},
+vna_opx_switch_map = {
+                      '112': {sl_list[0]: {'A': 0, 'D': 1, 'C': 0}, sl_list[1]: {'A': 0, 'D': 1, 'C': 0}, sl_list[2]: {'B': 1}},
                       '134': {sl_list[0]: {'A': 1, 'D': 1, 'C': 0}, sl_list[1]: {'A': 1, 'D': 1, 'C': 0}, sl_list[2]: {'B': 1}},
                       '212': {sl_list[0]: {'B': 0, 'D': 0, 'C': 0}, sl_list[1]: {'B': 0, 'D': 0, 'C': 0}, sl_list[2]: {'B': 1}},
                       '234': {sl_list[0]: {'B': 1, 'D': 0, 'C': 0}, sl_list[1]: {'B': 1, 'D': 0, 'C': 0}, sl_list[2]: {'B': 1}},
@@ -110,13 +111,13 @@ if TOF_testing:
 #               }
 
 if cluster_name == 'Proteox_main':
-    LO_IP_dict = {'q_LO': {'1': "TCPIP0::192.168.0.104::inst0::INSTR",
-                           '2': "TCPIP0::192.168.0.111::inst0::INSTR",
-                           '3': "TCPIP0::192.168.0.107::inst0::INSTR",
+    LO_IP_dict = {'q_LO': {'1': "TCPIP0::192.168.0.21::inst0::INSTR",
+                           '2': "TCPIP0::192.168.0.22::inst0::INSTR",
+                           '3': "TCPIP0::192.168.0.23::inst0::INSTR",
                            },
-                  'rr_LO': {'1': "TCPIP0::192.168.0.114::inst0::INSTR", #swapped with 105
-                            '2': "TCPIP0::192.168.0.200::inst0::INSTR",
-                            '3': "TCPIP0::192.168.0.105::inst0::INSTR", #swapped with 114
+                  'rr_LO': {'1': "TCPIP0::192.168.0.11::inst0::INSTR",
+                            '2': "TCPIP0::192.168.0.12::inst0::INSTR",
+                            '3': "TCPIP0::192.168.0.13::inst0::INSTR",
                             }
                   }
 else:
@@ -156,8 +157,14 @@ config = config_add_common_elements(config)
 
 q_anh = {}
 
-for keys, vals in q_LO.items():
-    q_anh[keys] = q12_IF[str(i)] - q_IF[str(i)]
+# for keys, vals in q_LO.items():
+#     q_anh[keys] = q12_IF[str(i)] - q_IF[str(i)]
+for keys in q_LO.keys():
+    if keys in anharmonicities.keys():
+        q_anh[keys] = anharmonicities[keys] * u.MHz
+    else:
+        q_anh[keys] = q_IF[keys] - q12_IF[keys]
+
 
 for i in range(1, n_qubits + 1):
     q_no = i
@@ -166,7 +173,7 @@ for i in range(1, n_qubits + 1):
     config = config_add_elements_q_rr(config, q_no, rr_no, dac_mapping, q_LO, q_IF, rr_LO, rr_IF, pi_len_ns,
                                       piby2_len_ns, pi_rise_grft_ns, amp_scale,
                                       mixers, mixer_corrections, ro_amp, ro_len_clk, tof, integ_len_clk,
-                                      optimal_readout_phase, smearing=0)
+                                      optimal_readout_phase, opt_weights, smearing=0)
 
     config = config_add_drag_grft(config, q_no, q_anh, pi_len_ns,
                                   piby2_len_ns, pi_rise_grft_ns, amp_scale, drag_dict)

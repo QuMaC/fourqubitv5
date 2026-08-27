@@ -1,0 +1,2 @@
+#structure, is to make it such that the job submitted to the opx can also run on the two qubit simulator. 
+#So i'm guessing most of the work would be to convert the program from qua into a timeline in the two qubit simulator, using the qua config and the program

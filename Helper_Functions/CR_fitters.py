@@ -68,7 +68,14 @@ def fit_bloch_params(x, y, z, tlist, init_vals=None):
     # initial values
 
     if init_vals is None:
-        init_cal = fit_cos(tlist, z)
+        # init_cal = fit_cos(tlist, z)
+        # B_in = init_cal["omega"]
+
+
+        # pick the component with the largest oscillation amplitude for the freq estimate
+        candidates = {"x": x, "y": y, "z": z}
+        best_signal = max(candidates.values(), key=lambda s: np.std(s))
+        init_cal = fit_cos(tlist, y)
         B_in = init_cal["omega"]
         del_in = np.sqrt(abs(init_cal["offset"] * B_in ** 2))
         ox_in = np.sqrt(0.5 * (B_in ** 2 - del_in ** 2))
