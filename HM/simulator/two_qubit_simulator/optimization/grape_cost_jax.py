@@ -96,21 +96,32 @@ def grape_cost(
 
 
 def combine_robust_fidelities_jax(
-    f_a: jnp.ndarray,
-    f_b: jnp.ndarray,
+    fidelities: jnp.ndarray,
     metric: str,
-    weights: tuple[float, float] = (0.5, 0.5),
+    weights: jnp.ndarray | tuple[float, ...] | list[float],
     spread_penalty_lambda: float = 0.3,
 ) -> jnp.ndarray:
-    """Combine two process fidelities. Returns shape ()."""
-    wa, wb = weights
+    """Combine N process fidelities into one scalar. Returns shape ().
+
+    Spread for ``mean_minus_spread`` is ``max(F) - min(F)`` (reduces to
+    ``|F_a - F_b|`` when N=2).
+    """
+    f = jnp.asarray(fidelities, dtype=jnp.float64).reshape(-1)
+    w = jnp.asarray(weights, dtype=jnp.float64).reshape(-1)
+    if f.size < 1:
+        raise ValueError("fidelities must be non-empty")
+    if w.size != f.size:
+        raise ValueError(
+            f"weights length {w.size} != fidelities length {f.size}"
+        )
+    w = w / jnp.maximum(jnp.sum(w), 1e-30)
     if metric == "weighted_mean":
-        return wa * f_a + wb * f_b
+        return jnp.sum(w * f)
     if metric == "geometric_mean":
-        return jnp.sqrt(jnp.maximum(f_a, 0.0) * jnp.maximum(f_b, 0.0))
+        return jnp.exp(jnp.sum(w * jnp.log(jnp.maximum(f, 1e-30))))
     if metric == "mean_minus_spread":
-        weighted = wa * f_a + wb * f_b
-        return weighted - spread_penalty_lambda * jnp.abs(f_a - f_b)
+        spread = jnp.max(f) - jnp.min(f)
+        return jnp.sum(w * f) - spread_penalty_lambda * spread
     raise ValueError(f"Unknown fidelity_metric {metric!r}")
 
 
@@ -120,10 +131,10 @@ def grape_cost_robust(
     statics: GrapeStatics,
     *,
     fidelity_metric: str = "weighted_mean",
-    weights: tuple[float, float] = (0.5, 0.5),
+    weights: jnp.ndarray | tuple[float, ...] | list[float] = (0.5, 0.5),
     spread_penalty_lambda: float = 0.3,
 ) -> jnp.ndarray:
-    """Scalar cost for length-2 target frame. sim frames already set."""
+    """Scalar cost for length-N batched target frames. sim frames already set."""
     knobs = _x_to_knobs_jax(x)
     cr_plus, _ = assemble_cr_half_jax(
         knobs,
@@ -146,10 +157,10 @@ def grape_cost_robust(
         )
 
     psi = sim.evolve_comp(timeline)
-    # Expect (2, 4, dim, 1). If you see (4, 2, dim, 1), swap axes here.
-    if psi.ndim != 4 or psi.shape[0] != 2 or psi.shape[1] != 4:
+    # Expect (N, 4, dim, 1). If you see (4, N, dim, 1), swap axes here.
+    if psi.ndim != 4 or psi.shape[1] != 4 or psi.shape[0] < 1:
         raise ValueError(
-            f"robust evolve_comp expected psi shape (2, 4, dim, 1), got {psi.shape}. "
+            f"robust evolve_comp expected psi shape (N, 4, dim, 1), got {psi.shape}. "
             "Print shape in the smoke test and fix axis order before jit."
         )
 
@@ -163,12 +174,13 @@ def grape_cost_robust(
 
     # vmap over detuning axis
     F_batch, leak_batch = jax.vmap(_one)(psi)
+    w = jnp.asarray(weights, dtype=jnp.float64).reshape(-1)
     F_comb = combine_robust_fidelities_jax(
-        F_batch[0],
-        F_batch[1],
+        F_batch,
         metric=fidelity_metric,
-        weights=weights,
+        weights=w,
         spread_penalty_lambda=spread_penalty_lambda,
     )
-    leak_comb = 0.5 * (leak_batch[0] + leak_batch[1])
+    w_n = w / jnp.maximum(jnp.sum(w), 1e-30)
+    leak_comb = jnp.sum(w_n * leak_batch)
     return -(F_comb - statics.leakage_weight * leak_comb)

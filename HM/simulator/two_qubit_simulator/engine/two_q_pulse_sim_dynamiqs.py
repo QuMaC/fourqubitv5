@@ -113,23 +113,25 @@ class TwoQubitPulseSimulatorDynamiqs:
         self._build_operators()
 
     def set_target_frame(self, frame1):
-        """Install target rotating-frame frequency (float or length-2 jax array).
+        """Install target rotating-frame frequency (float or length-N jax array).
 
         Lab GRAPE: pass a Python float.
-        Robust GRAPE: pass lab_f1 + jnp.asarray([+s, -s]) once before optimize.
+        Robust GRAPE: pass ``lab_f1 + jnp.asarray(shifts)`` once before optimize
+        (any ``N >= 1``; coupling / drive coeffs then batch over that axis).
         """
         # Keep jax arrays as jax arrays so coupling / drive coeffs batch.
         if hasattr(frame1, "shape") and getattr(frame1, "ndim", 0) > 0:
-            frame1 = jnp.asarray(frame1, dtype=jnp.float64)
-            if frame1.shape != (2,):
+            frame1 = jnp.asarray(frame1, dtype=jnp.float64).reshape(-1)
+            if frame1.ndim != 1 or frame1.size < 1:
                 raise ValueError(
-                    f"batched set_target_frame expects shape (2,), got {frame1.shape}"
+                    f"batched set_target_frame expects shape (N,) with N>=1, "
+                    f"got {getattr(frame1, 'shape', None)}"
                 )
         else:
             frame1 = float(frame1)
 
         self.qubits[1].frame_MHz = frame1
-        # frame0 stays a lab scalar; broadcast against length-2 frame1
+        # frame0 stays a lab scalar; broadcast against length-N frame1
         self.delta_qq_MHz = jnp.asarray(self.qubits[0].frame_MHz) - frame1
 
     def _build_operators(self) -> None:
@@ -377,7 +379,7 @@ class TwoQubitPulseSimulatorDynamiqs:
         Returns a JAX array (keeps the AD tape; no ``np.asarray``):
 
         - ``(4, dim, 1)`` if ``delta_qq_MHz`` is a lab scalar
-        - ``(2, 4, dim, 1)`` if ``delta_qq_MHz`` has shape ``(2,)`` (robust batch)
+        - ``(N, 4, dim, 1)`` if ``delta_qq_MHz`` has shape ``(N,)`` (robust batch)
         """
 
         L = self._validate_timeline(timeline)
