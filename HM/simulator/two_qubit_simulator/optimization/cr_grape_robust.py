@@ -1,20 +1,20 @@
-"""Robust (two-detuning) GRAPE for echoed CR gates.
+"""Robust (multi-detuning) GRAPE for echoed CR gates.
 
-One CR-half pulse is optimized so it works well at *two* target-qubit
+One CR-half pulse is optimized so it works well at *N* target-qubit
 frequencies at once (e.g. the target shifted by a spectator's ZZ interaction).
-The two frequencies are modelled by shifting the target qubit's ``frame_MHz``
-by ``+shift`` / ``-shift`` (see ``_apply_target_freq_shift``); nothing in the
-engine changes.
+Frequencies are modelled by shifting the target qubit's ``frame_MHz``;
+``shifts_mhz`` may be any list of length ``N >= 1``. If omitted, the default
+pair is ``+/- zz_shift_mhz / 2``.
 
 Combined fidelity metrics (set ``fidelity_metric`` in the config or test script):
 
-- ``weighted_mean``: ``w_a * F_a + w_b * F_b`` (default weights 0.5, 0.5)
-- ``geometric_mean``: ``sqrt(F_a * F_b)``
-- ``mean_minus_spread``: ``w_a * F_a + w_b * F_b - lambda * |F_a - F_b|``
+- ``weighted_mean``: ``sum_i w_i F_i`` (default equal weights)
+- ``geometric_mean``: ``exp(sum_i w_i log F_i)``
+- ``mean_minus_spread``: weighted mean minus ``lambda * (max F - min F)``
 
 The optimized pulse, seed, per-case convergence, and combined/per-case
 fidelities are saved (NPZ mirrors ``cr_grape.py`` + robust extras, filename
-carries a timestamp and the ZZ shift).
+carries a timestamp and the ZZ span).
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ import json
 import os
 import time
 from dataclasses import asdict, dataclass, field
-from typing import Any, Literal
+from typing import Any, Literal, Sequence
 import matplotlib
 
 # Headless / long batch runs: TkAgg GC can abort with Tcl_AsyncDelete.
@@ -106,34 +106,76 @@ def _default_results_dir() -> str:
 FidelityMetric = Literal["weighted_mean", "geometric_mean", "mean_minus_spread"]
 
 FIDELITY_METRICS: dict[FidelityMetric, str] = {
-    "weighted_mean": "Weighted arithmetic mean: w_a*F_a + w_b*F_b",
-    "geometric_mean": "Geometric mean: sqrt(F_a * F_b)",
+    "weighted_mean": "Weighted arithmetic mean over N detunings: sum_i w_i F_i",
+    "geometric_mean": "Weighted geometric mean: exp(sum_i w_i log F_i)",
     "mean_minus_spread": (
-        "Weighted mean minus spread penalty: w_a*F_a + w_b*F_b - lambda*|F_a-F_b|"
+        "Weighted mean minus spread: sum_i w_i F_i - lambda*(max F - min F)"
     ),
 }
 
 
 def combine_robust_fidelities(
-    f_a: float,
-    f_b: float,
+    fidelities: Sequence[float],
     metric: FidelityMetric,
-    weights: tuple[float, float] = (0.5, 0.5),
+    weights: Sequence[float] | None = None,
     spread_penalty_lambda: float = 0.3,
 ) -> float:
-    """Combine per-detuning process fidelities into one scalar objective."""
-    wa, wb = weights
+    """Combine N per-detuning process fidelities into one scalar objective.
+
+    Spread for ``mean_minus_spread`` is ``max(F)-min(F)`` (equals ``|F_a-F_b|``
+    when N=2).
+    """
+    f = np.asarray(list(fidelities), dtype=float).reshape(-1)
+    if f.size < 1:
+        raise ValueError("fidelities must be non-empty")
+    if weights is None:
+        w = np.full(f.size, 1.0 / f.size, dtype=float)
+    else:
+        w = np.asarray(weights, dtype=float).reshape(-1)
+        if w.size != f.size or np.any(w < 0):
+            raise ValueError(
+                f"weights must be {f.size} non-negative numbers "
+                f"(got size {w.size})"
+            )
+        total = float(w.sum())
+        if total <= 0:
+            w = np.full(f.size, 1.0 / f.size, dtype=float)
+        else:
+            w = w / total
     if metric == "weighted_mean":
-        return float(wa * f_a + wb * f_b)
+        return float(np.sum(w * f))
     if metric == "geometric_mean":
-        return float(np.sqrt(max(f_a, 0.0) * max(f_b, 0.0)))
+        return float(np.exp(np.sum(w * np.log(np.maximum(f, 1e-30)))))
     if metric == "mean_minus_spread":
-        weighted = wa * f_a + wb * f_b
-        return float(weighted - spread_penalty_lambda * abs(f_a - f_b))
+        spread = float(np.max(f) - np.min(f)) if f.size >= 2 else 0.0
+        return float(np.sum(w * f) - spread_penalty_lambda * spread)
     raise ValueError(
         f"Unknown fidelity_metric {metric!r}; "
         f"choose one of {list(FIDELITY_METRICS)}"
     )
+
+
+def _fidelity_spread(fidelities: Sequence[float]) -> float:
+    f = np.asarray(list(fidelities), dtype=float).reshape(-1)
+    if f.size < 2:
+        return 0.0
+    return float(np.max(f) - np.min(f))
+
+
+def _legacy_ab_fields(fs: Sequence[float], leaks: Sequence[float], avgs: Sequence[float]) -> dict:
+    """Keep process_fidelity_a/b keys for N>=2 callers / old plot scripts."""
+    out: dict = {
+        "process_fidelities": [float(v) for v in fs],
+        "leakages": [float(v) for v in leaks],
+        "average_gate_fidelities": [float(v) for v in avgs],
+        "process_fidelity_a": float(fs[0]) if len(fs) >= 1 else float("nan"),
+        "process_fidelity_b": float(fs[1]) if len(fs) >= 2 else float("nan"),
+        "leakage_a": float(leaks[0]) if len(leaks) >= 1 else float("nan"),
+        "leakage_b": float(leaks[1]) if len(leaks) >= 2 else float("nan"),
+        "average_gate_fidelity_a": float(avgs[0]) if len(avgs) >= 1 else float("nan"),
+        "average_gate_fidelity_b": float(avgs[1]) if len(avgs) >= 2 else float("nan"),
+    }
+    return out
 
 
 def fidelity_metric_label(metric: FidelityMetric) -> str:
@@ -158,7 +200,7 @@ def _metric_tag(metric: FidelityMetric, spread_penalty_lambda: float) -> str:
 # ---------------------------------------------------------------------------
 @dataclass
 class RobustCRGrapeConfig:
-    """Configuration for two-detuning (robust) echoed CR GRAPE."""
+    """Configuration for multi-detuning (robust) echoed CR GRAPE."""
 
     flat_len_ns: float = 122
     n_flat_knobs: int = 61
@@ -167,11 +209,12 @@ class RobustCRGrapeConfig:
     t_rise_ns: int = 16
     n_link_samples: int = 8
 
-    # Target-frequency spread. ``shifts_mhz`` (an explicit pair) takes priority;
+    # Target-frequency spread. ``shifts_mhz`` (any N>=1 list) takes priority;
     # otherwise the two cases are +/- zz_shift_mhz / 2.
     zz_shift_mhz: float = 0.3
     shifts_mhz: list[float] | None = None
-    weights: tuple[float, float] = (0.5, 0.5)
+    weights: Sequence[float] | None = None
+    """Per-shift weights (length N). None → equal 1/N."""
     fidelity_metric: FidelityMetric = "weighted_mean"
     spread_penalty_lambda: float = 0.3
 
@@ -198,24 +241,30 @@ class RobustCRGrapeConfig:
     def resolved_shifts(self) -> list[float]:
         if self.shifts_mhz is not None:
             s = [float(v) for v in self.shifts_mhz]
-            if len(s) != 2:
-                raise ValueError("shifts_mhz must have exactly two entries")
+            if len(s) < 1:
+                raise ValueError("shifts_mhz must have at least one entry")
             return s
         half = 0.5 * float(self.zz_shift_mhz)
         return [-half, half]
 
-    def resolved_weights(self) -> tuple[float, float]:
-        w = np.asarray(self.weights, dtype=float)
-        if w.size != 2 or np.any(w < 0):
-            raise ValueError("weights must be two non-negative numbers")
+    def resolved_weights(self) -> tuple[float, ...]:
+        n = len(self.resolved_shifts())
+        if self.weights is None:
+            return tuple(1.0 / n for _ in range(n))
+        w = np.asarray(self.weights, dtype=float).reshape(-1)
+        if w.size != n or np.any(w < 0):
+            raise ValueError(
+                f"weights must be {n} non-negative numbers "
+                f"(got size {w.size})"
+            )
         total = float(w.sum())
         if total <= 0:
-            return (0.5, 0.5)
-        return (float(w[0] / total), float(w[1] / total))
+            return tuple(1.0 / n for _ in range(n))
+        return tuple(float(v / total) for v in w)
 
     def zz_span_mhz(self) -> float:
         s = self.resolved_shifts()
-        return float(s[1] - s[0])
+        return float(max(s) - min(s))
 
     def resolved_fidelity_metric(self) -> FidelityMetric:
         metric = self.fidelity_metric
@@ -232,11 +281,11 @@ class RobustCRGrapeConfig:
 # ---------------------------------------------------------------------------
 @dataclass
 class RobustGrapeResult:
-    """Outcome of a robust (two-detuning) GRAPE run."""
+    """Outcome of a robust (multi-detuning) GRAPE run."""
 
     config: RobustCRGrapeConfig
     shifts_mhz: list[float]
-    weights: tuple[float, float]
+    weights: tuple[float, ...]
     target_gate: str
     flat_knobs_seed: np.ndarray
     flat_knobs_opt: np.ndarray
@@ -316,11 +365,31 @@ class RobustGrapeResult:
             shifts_mhz=np.asarray(self.shifts_mhz, dtype=float),
             weights=np.asarray(self.weights, dtype=float),
             zz_span_mhz=float(self.config.zz_span_mhz()),
-            seed_F_a=float(self.seed_metrics["process_fidelity_a"]),
-            seed_F_b=float(self.seed_metrics["process_fidelity_b"]),
+            seed_process_fidelities=np.asarray(
+                self.seed_metrics.get(
+                    "process_fidelities",
+                    [
+                        self.seed_metrics.get("process_fidelity_a", np.nan),
+                        self.seed_metrics.get("process_fidelity_b", np.nan),
+                    ],
+                ),
+                dtype=float,
+            ),
+            final_process_fidelities=np.asarray(
+                self.final_metrics.get(
+                    "process_fidelities",
+                    [
+                        self.final_metrics.get("process_fidelity_a", np.nan),
+                        self.final_metrics.get("process_fidelity_b", np.nan),
+                    ],
+                ),
+                dtype=float,
+            ),
+            seed_F_a=float(self.seed_metrics.get("process_fidelity_a", np.nan)),
+            seed_F_b=float(self.seed_metrics.get("process_fidelity_b", np.nan)),
             seed_F_combined=float(self.seed_metrics["process_fidelity"]),
-            final_F_a=float(self.final_metrics["process_fidelity_a"]),
-            final_F_b=float(self.final_metrics["process_fidelity_b"]),
+            final_F_a=float(self.final_metrics.get("process_fidelity_a", np.nan)),
+            final_F_b=float(self.final_metrics.get("process_fidelity_b", np.nan)),
             final_F_combined=float(self.final_metrics["process_fidelity"]),
         )
 
@@ -340,35 +409,62 @@ class RobustGrapeResult:
     def plot_convergence(self, out_png: str) -> None:
         # Prepend the seed as iteration 0 so the curves start from the seed.
         iters = [0] + [h["iteration"] + 1 for h in self.history]
-        f_a = [self.seed_metrics["process_fidelity_a"]] + [
-            h["process_fidelity_a"] for h in self.history
-        ]
-        f_b = [self.seed_metrics["process_fidelity_b"]] + [
-            h["process_fidelity_b"] for h in self.history
-        ]
+        n = len(self.shifts_mhz)
+        per_case = []
+        for i in range(n):
+            key = "process_fidelities"
+            seed_fs = self.seed_metrics.get(key)
+            if seed_fs is not None and len(seed_fs) > i:
+                seed_fi = float(seed_fs[i])
+            elif i == 0:
+                seed_fi = float(self.seed_metrics.get("process_fidelity_a", np.nan))
+            elif i == 1:
+                seed_fi = float(self.seed_metrics.get("process_fidelity_b", np.nan))
+            else:
+                seed_fi = float("nan")
+            hist_fi = []
+            for h in self.history:
+                hfs = h.get(key)
+                if hfs is not None and len(hfs) > i:
+                    hist_fi.append(float(hfs[i]))
+                elif i == 0:
+                    hist_fi.append(float(h.get("process_fidelity_a", np.nan)))
+                elif i == 1:
+                    hist_fi.append(float(h.get("process_fidelity_b", np.nan)))
+                else:
+                    hist_fi.append(float("nan"))
+            per_case.append([seed_fi] + hist_fi)
+
         f_c = [self.seed_metrics["process_fidelity"]] + [
             h["process_fidelity"] for h in self.history
         ]
 
         fig, ax = plt.subplots(figsize=(9, 5.5))
-        sa, sb = self.shifts_mhz
-        ax.plot(iters, f_a, "o-", ms=4, lw=1.3, color="tab:blue",
-                label=f"F_a (shift {sa:+.4g} MHz)")
-        ax.plot(iters, f_b, "s-", ms=4, lw=1.3, color="tab:orange",
-                label=f"F_b (shift {sb:+.4g} MHz)")
+        cmap = plt.cm.tab10
+        markers = ["o", "s", "^", "D", "v", "P", "X", "*"]
+        for i, (shift, curve) in enumerate(zip(self.shifts_mhz, per_case)):
+            ax.plot(
+                iters,
+                curve,
+                markers[i % len(markers)] + "-",
+                ms=4,
+                lw=1.3,
+                color=cmap(i % 10),
+                label=f"F[{i}] (shift {shift:+.4g} MHz)",
+            )
         metric = self.config.resolved_fidelity_metric()
         ax.plot(
             iters,
             f_c,
-            "^-",
+            "k-",
             ms=4,
             lw=1.6,
-            color="black",
+            marker="*",
             label=fidelity_metric_label(metric),
         )
         ax.set_xlabel("optimizer iteration (0 = seed)")
         ax.set_ylabel("process fidelity")
-        all_f = f_a + f_b + f_c
+        all_f = [v for curve in per_case for v in curve] + f_c
         lo, hi = min(all_f), max(all_f)
         pad = max((hi - lo) * 0.08, 1e-4)
         ax.set_ylim(lo - pad, min(1.0005, hi + pad))
@@ -378,7 +474,8 @@ class RobustGrapeResult:
         ax.set_title(
             f"Robust GRAPE convergence  |  target={self.target_gate}  |  "
             f"ZZ span={self.config.zz_span_mhz():.4g} MHz  |  "
-            f"flat={self.config.flat_len_ns:.0f} ns  knobs={self.config.n_flat_knobs}\n"
+            f"N={len(self.shifts_mhz)}  flat={self.config.flat_len_ns:.0f} ns  "
+            f"knobs={self.config.n_flat_knobs}\n"
             f"metric={metric}  ({metric_desc})"
         )
         plt.tight_layout()
@@ -415,17 +512,27 @@ class RobustGrapeResult:
             f"time within one CR half (ns)  |  held at n_sub={n_sub}  "
             f"(dt_sub={dt / n_sub:g} ns)"
         )
-        sa, sb = self.shifts_mhz
         s = self.seed_metrics
         f = self.final_metrics
+
+        def _fi_line(m: dict, label: str) -> str:
+            fs = m.get("process_fidelities")
+            if not fs:
+                fs = [
+                    m.get("process_fidelity_a", float("nan")),
+                    m.get("process_fidelity_b", float("nan")),
+                ]
+            parts = [
+                f"F[{i}]({sh:+.4g})={fi:.5f}"
+                for i, (sh, fi) in enumerate(zip(self.shifts_mhz, fs))
+            ]
+            return f"{label}: F_comb={m['process_fidelity']:.5f}   " + "   ".join(parts)
+
         summary = (
-            f"target={self.target_gate}   ZZ span={self.config.zz_span_mhz():.4g} MHz\n"
-            f"seed:  F_comb={s['process_fidelity']:.5f}   "
-            f"F_a({sa:+.4g})={s['process_fidelity_a']:.5f}   "
-            f"F_b({sb:+.4g})={s['process_fidelity_b']:.5f}\n"
-            f"final: F_comb={f['process_fidelity']:.5f}   "
-            f"F_a({sa:+.4g})={f['process_fidelity_a']:.5f}   "
-            f"F_b({sb:+.4g})={f['process_fidelity_b']:.5f}"
+            f"target={self.target_gate}   ZZ span={self.config.zz_span_mhz():.4g} MHz  "
+            f"N={len(self.shifts_mhz)}\n"
+            f"{_fi_line(s, 'seed')}\n"
+            f"{_fi_line(f, 'final')}"
         )
         axes[0].set_title(
             "Robust CR half: seed vs optimized "
@@ -541,8 +648,11 @@ class RobustCRGrapeOptimizer:
                     f"(got {type(sim).__name__})"
                 )
         elif exps is not None:
-            if len(exps) != 2:
-                raise ValueError("exps must be a list of exactly two experiments")
+            if len(exps) != len(self.shifts):
+                raise ValueError(
+                    f"exps must have length {len(self.shifts)} "
+                    f"(one per shift); got {len(exps)}"
+                )
             self.exps = list(exps)
         else:
             self.exps = [_build_shifted_exp(config, s) for s in self.shifts]
@@ -596,9 +706,8 @@ class RobustCRGrapeOptimizer:
         if config.use_jax_grad:
             sim = self.exps[0].simulator
             f1 = float(np.asarray(sim.qubits[1].frame_MHz).reshape(()))
-            sa, sb = self.shifts
             sim.set_target_frame(
-                f1 + jnp.asarray([sa, sb], dtype=jnp.float64)
+                f1 + jnp.asarray(self.shifts, dtype=jnp.float64)
             )
             self._jax_statics = _build_robust_grape_statics(self)
             statics = self._jax_statics
@@ -665,36 +774,31 @@ class RobustCRGrapeOptimizer:
                 }
             )
 
-        f_a = per_case[0]["process_fidelity"]
-        f_b = per_case[1]["process_fidelity"]
+        fs = [c["process_fidelity"] for c in per_case]
+        leaks = [c["leakage"] for c in per_case]
+        avgs = [c["average_gate_fidelity"] for c in per_case]
         f_combined = combine_robust_fidelities(
-            f_a,
-            f_b,
+            fs,
             self.fidelity_metric,
             weights=self.weights,
             spread_penalty_lambda=self.config.spread_penalty_lambda,
         )
-        wa, wb = self.weights
-        leak_combined = wa * per_case[0]["leakage"] + wb * per_case[1]["leakage"]
+        w = np.asarray(self.weights, dtype=float)
+        leak_combined = float(np.sum(w * np.asarray(leaks, dtype=float)))
         cost = -f_combined
         elapsed = time.perf_counter() - t0
 
         metrics = {
             "process_fidelity": float(f_combined),
-            "process_fidelity_a": float(f_a),
-            "process_fidelity_b": float(f_b),
-            "fidelity_spread": float(abs(f_a - f_b)),
+            "fidelity_spread": _fidelity_spread(fs),
             "fidelity_metric": self.fidelity_metric,
             "spread_penalty_lambda": float(self.config.spread_penalty_lambda),
-            "average_gate_fidelity_a": per_case[0]["average_gate_fidelity"],
-            "average_gate_fidelity_b": per_case[1]["average_gate_fidelity"],
-            "leakage_a": per_case[0]["leakage"],
-            "leakage_b": per_case[1]["leakage"],
             "leakage": float(leak_combined),
             "cost": float(cost),
             "target_gate": self.target_gate,
             "elapsed_s": float(elapsed),
             "u_max_mhz": float(np.max(np.abs(flat_knobs))),
+            **_legacy_ab_fields(fs, leaks, avgs),
         }
         return cost, metrics
 
@@ -704,6 +808,7 @@ class RobustCRGrapeOptimizer:
         sim = self.exps[0].simulator
         statics = self._jax_statics
         assert statics is not None
+        n = len(self.shifts)
 
         knobs_j = jnp.asarray(flat_knobs, dtype=jnp.complex128).reshape(-1)
         cr_plus, _ = assemble_cr_half_jax(
@@ -720,14 +825,14 @@ class RobustCRGrapeOptimizer:
             echo_channel=statics.echo_channel,
         )
         psi = sim.evolve_comp(timeline)
-        if psi.ndim != 4 or psi.shape[0] != 2 or psi.shape[1] != 4:
+        if psi.ndim != 4 or psi.shape[0] != n or psi.shape[1] != 4:
             raise ValueError(
-                f"batched metrics expected psi (2, 4, dim, 1), got {psi.shape}"
+                f"batched metrics expected psi ({n}, 4, dim, 1), got {psi.shape}"
             )
 
         Fs = []
         leaks = []
-        for i in range(2):
+        for i in range(n):
             U_comp = u_comp_from_psi_jax(psi[i], statics.comp_indices)
             Fs.append(
                 float(
@@ -738,37 +843,31 @@ class RobustCRGrapeOptimizer:
             )
             leaks.append(float(leakage_from_psi_jax(psi[i], statics.comp_indices)))
 
-        f_a, f_b = Fs
         f_combined = float(
             combine_robust_fidelities_jax(
-                jnp.asarray(f_a),
-                jnp.asarray(f_b),
+                jnp.asarray(Fs),
                 metric=self.fidelity_metric,
                 weights=self.weights,
                 spread_penalty_lambda=float(self.config.spread_penalty_lambda),
             )
         )
-        wa, wb = self.weights
-        leak_combined = float(wa * leaks[0] + wb * leaks[1])
+        w = np.asarray(self.weights, dtype=float)
+        leak_combined = float(np.sum(w * np.asarray(leaks, dtype=float)))
         cost = -f_combined
         elapsed = time.perf_counter() - t0
+        avgs = [float("nan")] * n
         metrics = {
             "process_fidelity": f_combined,
-            "process_fidelity_a": f_a,
-            "process_fidelity_b": f_b,
-            "fidelity_spread": float(abs(f_a - f_b)),
+            "fidelity_spread": _fidelity_spread(Fs),
             "fidelity_metric": self.fidelity_metric,
             "spread_penalty_lambda": float(self.config.spread_penalty_lambda),
-            "average_gate_fidelity_a": float("nan"),
-            "average_gate_fidelity_b": float("nan"),
-            "leakage_a": leaks[0],
-            "leakage_b": leaks[1],
             "leakage": leak_combined,
             "cost": cost,
             "target_gate": self.target_gate,
             "elapsed_s": float(elapsed),
             "u_max_mhz": float(np.max(np.abs(flat_knobs))),
             "backend": "jax_batched",
+            **_legacy_ab_fields(Fs, leaks, avgs),
         }
         return cost, metrics
 
@@ -784,8 +883,7 @@ class RobustCRGrapeOptimizer:
             self._pbar.set_description(f"robust GRAPE iter {self._iteration} [{phase}]")
             self._pbar.set_postfix(
                 Fc=f"{metrics['process_fidelity']:.4f}",
-                Fa=f"{metrics['process_fidelity_a']:.4f}",
-                Fb=f"{metrics['process_fidelity_b']:.4f}",
+                spread=f"{metrics.get('fidelity_spread', float('nan')):.4f}",
                 eval_iter=evals_this_iter,
                 sec=f"{metrics['elapsed_s']:.1f}",
                 refresh=True,
@@ -793,8 +891,7 @@ class RobustCRGrapeOptimizer:
         elif self.config.log_every_eval:
             print(
                 f"  eval {metrics['eval']:4d}  Fc={metrics['process_fidelity']:.5f}  "
-                f"Fa={metrics['process_fidelity_a']:.5f}  "
-                f"Fb={metrics['process_fidelity_b']:.5f}"
+                f"spread={metrics.get('fidelity_spread', float('nan')):.5f}"
             )
         return cost
 
@@ -809,6 +906,7 @@ class RobustCRGrapeOptimizer:
         knobs = _x_to_knobs(x)
         metrics = {
             "process_fidelity": float(-c_f),
+            "process_fidelities": [],
             "process_fidelity_a": float("nan"),
             "process_fidelity_b": float("nan"),
             "fidelity_spread": float("nan"),
@@ -858,16 +956,15 @@ class RobustCRGrapeOptimizer:
             self._pbar.set_description(f"robust GRAPE iter {self._iteration + 1}")
             self._pbar.set_postfix(
                 Fc=f"{row['process_fidelity']:.4f}",
-                Fa=f"{row['process_fidelity_a']:.4f}",
-                Fb=f"{row['process_fidelity_b']:.4f}",
+                spread=f"{row.get('fidelity_spread', float('nan')):.4f}",
                 evals=len(self.eval_history),
                 refresh=True,
             )
         else:
             print(
                 f"iter {self._iteration:3d}  Fc={row['process_fidelity']:.5f}  "
-                f"Fa={row['process_fidelity_a']:.5f}  "
-                f"Fb={row['process_fidelity_b']:.5f}  leak={row['leakage']:.5f}"
+                f"spread={row.get('fidelity_spread', float('nan')):.5f}  "
+                f"leak={row['leakage']:.5f}"
             )
         self._iteration += 1
         self._eval_at_iter_start = len(self.eval_history)
@@ -920,8 +1017,7 @@ class RobustCRGrapeOptimizer:
                 print(
                     f"  step {i:4d}  cost={float(c):.8f}  "
                     f"Fc={metrics['process_fidelity']:.5f}  "
-                    f"Fa={metrics['process_fidelity_a']:.5f}  "
-                    f"Fb={metrics['process_fidelity_b']:.5f}"
+                    f"spread={metrics.get('fidelity_spread', float('nan')):.5f}"
                 )
         return _x_to_knobs(np.asarray(x))
 
@@ -930,16 +1026,16 @@ class RobustCRGrapeOptimizer:
         return metrics
 
     def run(self) -> RobustGrapeResult:
-        sa, sb = self.shifts
-        wa, wb = self.weights
+        shifts_s = ", ".join(f"{s:+.4g}" for s in self.shifts)
+        weights_s = ", ".join(f"{w:.3f}" for w in self.weights)
         print("Fidelity metrics available:")
         for key, desc in FIDELITY_METRICS.items():
             marker = " <-- selected" if key == self.fidelity_metric else ""
             print(f"  {key:18s}  {desc}{marker}")
         print(
             f"\nTarget gate: {self.target_gate}  (fixed)  |  "
-            f"shifts = [{sa:+.4g}, {sb:+.4g}] MHz  |  weights = ({wa:.2f}, {wb:.2f})  |  "
-            f"metric = {self.fidelity_metric}"
+            f"N={len(self.shifts)} shifts = [{shifts_s}] MHz  |  "
+            f"weights = ({weights_s})  |  metric = {self.fidelity_metric}"
         )
         if self.fidelity_metric == "mean_minus_spread":
             print(f"  spread_penalty_lambda = {self.config.spread_penalty_lambda:.4g}")
@@ -1049,14 +1145,22 @@ class RobustCRGrapeOptimizer:
 
 
 def _print_metrics(m: dict, shifts: list[float]) -> None:
-    sa, sb = shifts
-    spread = m.get("fidelity_spread", abs(m["process_fidelity_a"] - m["process_fidelity_b"]))
+    fs = m.get("process_fidelities")
+    if not fs:
+        fs = [
+            m.get("process_fidelity_a", float("nan")),
+            m.get("process_fidelity_b", float("nan")),
+        ]
+    spread = m.get("fidelity_spread", _fidelity_spread(fs))
+    parts = "  ".join(
+        f"F[{i}]({sh:+.4g})={fi:.5f}"
+        for i, (sh, fi) in enumerate(zip(shifts, fs))
+    )
     print(
         f"  target={m.get('target_gate', '?')}  "
         f"F_comb={m['process_fidelity']:.5f}  "
-        f"F_a({sa:+.4g})={m['process_fidelity_a']:.5f}  "
-        f"F_b({sb:+.4g})={m['process_fidelity_b']:.5f}  "
-        f"|dF|={spread:.5f}  "
+        f"{parts}  "
+        f"spread={spread:.5f}  "
         f"leak={m['leakage']:.5f}"
     )
 
@@ -1064,7 +1168,7 @@ def _print_metrics(m: dict, shifts: list[float]) -> None:
 def optimize_robust_cr_grape(
     zz_shift_mhz: float = 0.2,
     shifts_mhz: list[float] | None = None,
-    weights: tuple[float, float] = (0.5, 0.5),
+    weights: Sequence[float] | None = None,
     fidelity_metric: FidelityMetric = "weighted_mean",
     spread_penalty_lambda: float = 0.3,
     flat_len_ns: float = 84.0,
@@ -1090,11 +1194,12 @@ def optimize_robust_cr_grape(
     adam_steps: int = 200,
     evolution: str = "comp",
 ) -> RobustGrapeResult:
-    """User-facing entry point for robust (two-detuning) echoed CR GRAPE.
+    """User-facing entry point for robust (multi-detuning) echoed CR GRAPE.
 
-    The two target frequencies are ``+/- zz_shift_mhz/2`` unless an explicit
-    ``shifts_mhz`` pair is given. Combined fidelity is set by
-    ``fidelity_metric`` (see ``FIDELITY_METRICS``).
+    Target frequencies are ``+/- zz_shift_mhz/2`` unless an explicit
+    ``shifts_mhz`` list of any length ``N >= 1`` is given. Combined fidelity
+    is set by ``fidelity_metric`` (see ``FIDELITY_METRICS``). Weights default
+    to equal ``1/N``.
 
     Set ``use_jax_grad=True`` for one dynamiqs experiment with batched frames
     and SciPy ``jac=True`` (L-BFGS) or ``optimizer='adam'`` (optax).

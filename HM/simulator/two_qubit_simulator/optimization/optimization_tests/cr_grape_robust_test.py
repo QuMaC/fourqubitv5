@@ -1,7 +1,7 @@
-"""Robust (two-detuning) echoed CR GRAPE: one pulse optimized across a ZZ shift.
+"""Robust (multi-detuning) echoed CR GRAPE: one pulse optimized across ZZ shifts.
 
-Defaults to dynamiqs + JAX AD (batched ±frame). Set ``USE_JAX_GRAD = False``
-to fall back to the two-exp QuTiP / finite-difference path.
+Defaults to dynamiqs + JAX AD (batched frames). Set ``USE_JAX_GRAD = False``
+to fall back to the QuTiP / finite-difference path (one experiment per shift).
 
 Edit the knobs below, then run this file directly.
 """
@@ -30,16 +30,18 @@ FLAT_LEN_NS = 122.0
 N_FLAT_KNOBS = 61  # 46
 N_LINK_SAMPLES = 8
 
-# Two-detuning setup. ZZ_SHIFT_MHZ expands to +/- ZZ_SHIFT_MHZ/2.
-# Set SHIFTS_MHZ to an explicit pair to override (e.g. [-0.15, 0.05]).
+# Multi-detuning setup.
+# - If SHIFTS_MHZ is None: cases are +/- ZZ_SHIFT_MHZ/2 (two points).
+# - Else: any list, e.g. [-0.15, 0.0, 0.15] or [-0.15, 0.05].
 ZZ_SHIFT_MHZ = 0.3
-SHIFTS_MHZ = None
-WEIGHTS = (0.5, 0.5)
+SHIFTS_MHZ = None  # e.g. [-0.15, 0.0, 0.15]
+# Per-shift weights (length must match N). None → equal 1/N.
+WEIGHTS = None
 
 # Combined fidelity metric — pick one of FIDELITY_METRICS:
-#   weighted_mean      -> w_a*F_a + w_b*F_b
-#   geometric_mean     -> sqrt(F_a * F_b)
-#   mean_minus_spread  -> weighted mean - SPREAD_PENALTY_LAMBDA * |F_a - F_b|
+#   weighted_mean      -> sum_i w_i F_i
+#   geometric_mean     -> exp(sum_i w_i log F_i)
+#   mean_minus_spread  -> weighted mean - SPREAD_PENALTY_LAMBDA * (max F - min F)
 
 FIDELITY_METRIC: FidelityMetric = "mean_minus_spread"
 SPREAD_PENALTY_LAMBDA = 0.3
@@ -55,7 +57,7 @@ OPTIMIZER = "lbfgs"
 ADAM_LR = 0.02
 ADAM_STEPS = 200
 EVOLUTION = "comp"  # robust JAX path locks "comp"
-N_SUB = 14  # passed into CR_len_sweep; Phase 5/6 smoke value
+N_SUB = 16  # passed into CR_len_sweep; unused by dynamiqs Path A
 QUBIT_PAIR = [1, 2]
 N_LEVELS = 3
 SHOW_PROGRESS = True

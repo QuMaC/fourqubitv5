@@ -85,7 +85,48 @@ def test_batch_frame_shapes_and_parity() -> None:
     print("F_batch", F_batch, "F_seq", F_seq)
     for a, b in zip(F_batch, F_seq):
         assert abs(a - b) < 5e-4, (a, b)
+
+    # N=3 batch axis
+    shifts3 = jnp.asarray([-s, 0.0, +s], dtype=jnp.float64)
+    sim.set_target_frame(f1 + shifts3)
+    psi3 = sim.evolve_comp(timeline)
+    print("N=3 psi.shape", tuple(psi3.shape))
+    assert psi3.shape == (3, 4, 9, 1), psi3.shape
     print("PHASE 6 SHAPE+PARITY OK")
+
+
+def test_robust_n_shifts_seed_eval() -> None:
+    """Seed-only evaluate with three shifts (no optimize)."""
+    cfg = RobustCRGrapeConfig(
+        flat_len_ns=122.0,
+        n_flat_knobs=61,
+        seed_amp_mhz=-21.0,
+        seed_phase_rad=0.0,
+        shifts_mhz=[-0.1, 0.0, 0.1],
+        weights=None,
+        fidelity_metric="mean_minus_spread",
+        spread_penalty_lambda=0.3,
+        use_jax_grad=True,
+        evolution="comp",
+        n_sub=14,
+        optimize=False,
+        show_progress=False,
+        target_gate="zx_90",
+    )
+    opt = RobustCRGrapeOptimizer(cfg)
+    m = opt.evaluate_seed()
+    assert len(m["process_fidelities"]) == 3
+    assert abs(m["process_fidelity_a"] - m["process_fidelities"][0]) < 1e-12
+    assert abs(m["process_fidelity_b"] - m["process_fidelities"][1]) < 1e-12
+    print(
+        "N=3 seed F_comb",
+        m["process_fidelity"],
+        "Fs",
+        m["process_fidelities"],
+        "spread",
+        m["fidelity_spread"],
+    )
+    print("N-SHIFTS SEED OK")
 
 
 def test_robust_lbfgs_smoke() -> None:
@@ -125,10 +166,8 @@ def test_robust_lbfgs_smoke() -> None:
     print(
         "final F_comb",
         result.final_metrics["process_fidelity"],
-        "Fa",
-        result.final_metrics["process_fidelity_a"],
-        "Fb",
-        result.final_metrics["process_fidelity_b"],
+        "Fs",
+        result.final_metrics.get("process_fidelities"),
         "n_eval",
         n_eval,
     )
@@ -139,4 +178,5 @@ def test_robust_lbfgs_smoke() -> None:
 
 if __name__ == "__main__":
     test_batch_frame_shapes_and_parity()
+    test_robust_n_shifts_seed_eval()
     test_robust_lbfgs_smoke()
