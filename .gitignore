@@ -2,6 +2,10 @@
 __pycache__/
 *.pyc
 
+# Local path / env overrides
+.env
+
+
 # Data files
 *.csv
 *.ods

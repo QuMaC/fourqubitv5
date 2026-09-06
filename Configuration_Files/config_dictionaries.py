@@ -1,9 +1,19 @@
 import json
+import os
+from pathlib import Path
+
+from dotenv import load_dotenv
 from Helper_Functions.helper_functionsv2 import *
 from qualang_tools.units import unit
 
-path_global = r"D:\QUA\Master_Scripts\fourqubitv5_Hari"
-single_qubit_experiments_path = r"D:\QUA\Master_Scripts\fourqubitv5_Hari\HM\single_qubit_experiments"
+_repo_root = Path(__file__).resolve().parents[1]
+load_dotenv(_repo_root / ".env")
+
+path_global = os.environ.get("PATH_GLOBAL", str(_repo_root))
+single_qubit_experiments_path = os.environ.get(
+    "SINGLE_QUBIT_EXPERIMENTS_PATH",
+    str(_repo_root / "HM" / "single_qubit_experiments"),
+)
 
 u = unit()
 n_qubits = 8
