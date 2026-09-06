@@ -90,7 +90,7 @@ N_LEVELS = 3
 
 # Backend: dynamiqs (default) vs QuTiP FD.
 USE_JAX_GRAD = True
-# "lbfgs" (default) or "adam"; adam requires USE_JAX_GRAD=True.
+# "lbfgs" (default), "adam", or "adan"; adam/adan require USE_JAX_GRAD=True.
 OPTIMIZER = "lbfgs"
 ADAM_LR = 0.02
 ADAM_STEPS = 200

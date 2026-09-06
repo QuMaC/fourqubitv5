@@ -52,7 +52,7 @@ def _date_tag() -> str:
 # ---------------------------------------------------------------------------
 # Bloch-sphere primitives
 # ---------------------------------------------------------------------------
-def draw_bloch_sphere(ax, wireframe_alpha=0.18, elev=22, azim=-58):
+def draw_bloch_sphere(ax, wireframe_alpha=0.18, elev=5, azim=-90):
     """Unit Bloch sphere wireframe and axis arrows on a 3D axes.
 
     Matplotlib ``view_init`` angles (degrees): ``elev`` tilts the camera;

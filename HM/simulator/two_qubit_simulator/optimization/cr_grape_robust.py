@@ -50,10 +50,21 @@ from HM.simulator.two_qubit_simulator.engine.pulses_jax import (
 from HM.simulator.two_qubit_simulator.experiments.cr_len_sweep import CR_len_sweep
 from HM.simulator.two_qubit_simulator.optimization.cr_grape import (
     DEFAULT_CR_PULSE_PARAMS,
+    FIRST_ORDER_OPTIMIZERS,
+    KNOWN_OPTIMIZERS,
+    _annotate_amp_grid,
     _knobs_to_x,
+    _normalize_optimizer,
+    _optax_log_steps,
+    _optax_solver,
     _to_jsonable,
     _x_to_knobs,
+    amp_grid_plot_tag,
+    amp_step_mhz_from_khz,
     echoed_gate_duration_ns,
+    quantize_amp_knobs,
+    quantize_amp_x,
+    quantize_amp_x_ste_jax,
 )
 from HM.simulator.two_qubit_simulator.optimization.fidelity import (
     average_gate_fidelity,
@@ -220,6 +231,8 @@ class RobustCRGrapeConfig:
 
     target_gate: str | None = None
     amp_bound_mhz: float = 48.0
+    amp_step_khz: float | None = None
+    """If set, I/Q knobs are quantized to this step (kHz). e.g. 0.55 -> 0.00055 MHz."""
     maxiter: int = 360
     qubit_pair: list[int] = field(default_factory=lambda: [1, 2])
     n_levels: int = 3
@@ -231,10 +244,12 @@ class RobustCRGrapeConfig:
     use_jax_grad: bool = False
     """If True, one dynamiqs exp + batched frames + SciPy jac=True."""
     optimizer: str = "lbfgs"
-    """lbfgs (default) or adam; adam requires use_jax_grad=True."""
+    """lbfgs (default), adam, or adan. adam/adan require use_jax_grad=True."""
     adam_lr: float = 0.02
     adam_steps: int = 200
-    """Used only when optimizer='adam'."""
+    """Used when optimizer is adam or adan."""
+    adam_log_every: int = 1
+    """Record history every N first-order steps (1 = every step). Always logs first and last."""
     evolution: str = "comp"
     """comp only for JAX robust path."""
 
@@ -442,11 +457,12 @@ class RobustGrapeResult:
         fig, ax = plt.subplots(figsize=(9, 5.5))
         cmap = plt.cm.tab10
         markers = ["o", "s", "^", "D", "v", "P", "X", "*"]
+        dense = len(iters) > 40
         for i, (shift, curve) in enumerate(zip(self.shifts_mhz, per_case)):
             ax.plot(
                 iters,
                 curve,
-                markers[i % len(markers)] + "-",
+                "-" if dense else markers[i % len(markers)] + "-",
                 ms=4,
                 lw=1.3,
                 color=cmap(i % 10),
@@ -459,7 +475,7 @@ class RobustGrapeResult:
             "k-",
             ms=4,
             lw=1.6,
-            marker="*",
+            marker="" if dense else "*",
             label=fidelity_metric_label(metric),
         )
         ax.set_xlabel("optimizer iteration (0 = seed)")
@@ -477,7 +493,9 @@ class RobustGrapeResult:
             f"N={len(self.shifts_mhz)}  flat={self.config.flat_len_ns:.0f} ns  "
             f"knobs={self.config.n_flat_knobs}\n"
             f"metric={metric}  ({metric_desc})"
+            f"{amp_grid_plot_tag(self.config.amp_step_khz)}"
         )
+        _annotate_amp_grid(fig, self.config.amp_step_khz)
         plt.tight_layout()
         plt.savefig(out_png, dpi=160)
         plt.close(fig)
@@ -537,11 +555,13 @@ class RobustGrapeResult:
         axes[0].set_title(
             "Robust CR half: seed vs optimized "
             f"(shaded: rise / flat / fall; each sample held ×{n_sub})"
+            f"{amp_grid_plot_tag(self.config.amp_step_khz)}"
         )
         fig.text(0.01, 0.005, summary, ha="left", va="bottom", fontsize=8,
                  family="monospace", color="0.15")
         fig.text(0.99, 0.005, "blue=rise  orange=flat  purple=fall", ha="right",
                  va="bottom", fontsize=8, color="0.45")
+        _annotate_amp_grid(fig, self.config.amp_step_khz)
         plt.tight_layout(rect=(0, 0.09, 1, 1))
         plt.savefig(out_png, dpi=160)
         plt.close(fig)
@@ -627,16 +647,23 @@ class RobustCRGrapeOptimizer:
         self._jax_statics: GrapeStatics | None = None
         self._cost_vg = None
 
+        opt_name = _normalize_optimizer(config.optimizer)
+        if opt_name not in KNOWN_OPTIMIZERS:
+            raise ValueError(
+                f"unknown robust optimizer {config.optimizer!r}; "
+                f"use one of {KNOWN_OPTIMIZERS}"
+            )
+        if opt_name in FIRST_ORDER_OPTIMIZERS and not config.use_jax_grad:
+            raise ValueError(
+                f"optimizer={config.optimizer!r} requires use_jax_grad=True "
+                "(first-order optax uses the batched dynamiqs cost)"
+            )
+
         if config.use_jax_grad:
             if exps is not None:
                 raise ValueError(
                     "use_jax_grad=True builds its own single dynamiqs experiment; "
                     "do not pass exps="
-                )
-            if config.optimizer not in ("lbfgs", "adam"):
-                raise ValueError(
-                    f"unknown robust optimizer {config.optimizer!r}; "
-                    "use 'lbfgs' or 'adam'"
                 )
             if str(config.evolution) != "comp":
                 raise ValueError("robust JAX path locks evolution='comp'")
@@ -680,6 +707,11 @@ class RobustCRGrapeOptimizer:
                 t_rise_ns=config.t_rise_ns,
                 dt_ns=self.dt,
             )
+        self._amp_step_mhz = amp_step_mhz_from_khz(config.amp_step_khz)
+        if self._amp_step_mhz is not None:
+            self.flat_knobs_seed = quantize_amp_knobs(
+                self.flat_knobs_seed, self._amp_step_mhz
+            )
         self.cr_half_seed, self.half_slices = assemble_cr_half_from_flat_knobs(
             self.flat_knobs_seed,
             flat_len_ns=config.flat_len_ns,
@@ -714,10 +746,12 @@ class RobustCRGrapeOptimizer:
             metric = self.fidelity_metric
             weights = self.weights
             lam = float(config.spread_penalty_lambda)
+            amp_step = self._amp_step_mhz
 
             def _cost_only(x):
+                xq = quantize_amp_x_ste_jax(x, amp_step)
                 return grape_cost_robust(
-                    x,
+                    xq,
                     sim,
                     statics,
                     fidelity_metric=metric,
@@ -754,6 +788,7 @@ class RobustCRGrapeOptimizer:
         return exp._propagator_from_timeline(timeline)
 
     def cost_from_knobs(self, flat_knobs: np.ndarray) -> tuple[float, dict]:
+        flat_knobs = quantize_amp_knobs(flat_knobs, self._amp_step_mhz)
         if self.config.use_jax_grad:
             return self._cost_from_knobs_batched(flat_knobs)
 
@@ -872,6 +907,7 @@ class RobustCRGrapeOptimizer:
         return cost, metrics
 
     def _cost_x(self, x: np.ndarray) -> float:
+        x = quantize_amp_x(x, self._amp_step_mhz)
         knobs = _x_to_knobs(x)
         cost, metrics = self.cost_from_knobs(knobs)
         metrics["eval"] = len(self.eval_history)
@@ -903,7 +939,7 @@ class RobustCRGrapeOptimizer:
         c_f = float(c)
         g_np = np.asarray(g, dtype=float)
         elapsed = time.perf_counter() - t0
-        knobs = _x_to_knobs(x)
+        knobs = quantize_amp_knobs(_x_to_knobs(x), self._amp_step_mhz)
         metrics = {
             "process_fidelity": float(-c_f),
             "process_fidelities": [],
@@ -942,7 +978,7 @@ class RobustCRGrapeOptimizer:
 
     def _callback(self, x: np.ndarray) -> None:
         if self.config.use_jax_grad:
-            knobs = _x_to_knobs(x)
+            knobs = quantize_amp_knobs(_x_to_knobs(x), self._amp_step_mhz)
             _, metrics = self.cost_from_knobs(knobs)
             metrics["eval"] = len(self.eval_history)
             self._last_eval_metrics = metrics
@@ -969,21 +1005,24 @@ class RobustCRGrapeOptimizer:
         self._iteration += 1
         self._eval_at_iter_start = len(self.eval_history)
 
-    def _run_adam(
+    def _run_optax(
         self, x0: np.ndarray, bounds: list[tuple[float, float]]
     ) -> np.ndarray:
-        """Optax Adam on the same batched robust cost as L-BFGS (Phase 5 mirror)."""
+        """Optax Adam or Adan on the same batched robust cost as L-BFGS."""
         import optax
 
         lo = np.array([b[0] for b in bounds], dtype=float)
         hi = np.array([b[1] for b in bounds], dtype=float)
+        amp_step = self._amp_step_mhz
+        opt_name = _normalize_optimizer(self.config.optimizer)
 
         x = jnp.asarray(x0, dtype=jnp.float64)
-        opt = optax.adam(self.config.adam_lr)
+        opt = _optax_solver(opt_name, self.config.adam_lr)
         opt_state = opt.init(x)
 
+        label = "Adam" if opt_name == "adam" else "Adan"
         print(
-            f"\nStarting Adam (robust batch): steps={self.config.adam_steps}, "
+            f"\nStarting {label} (robust batch): steps={self.config.adam_steps}, "
             f"lr={self.config.adam_lr}"
         )
         print("  Compiling first step...")
@@ -994,32 +1033,38 @@ class RobustCRGrapeOptimizer:
             updates, opt_state = opt.update(g, opt_state, x)
             x = optax.apply_updates(x, updates)
             x = jnp.clip(x, lo, hi)
+            if amp_step is not None:
+                step_mhz = jnp.asarray(amp_step, dtype=x.dtype)
+                x = jnp.round(x / step_mhz) * step_mhz
             return x, opt_state, c
 
-        x, opt_state, c = step(x, opt_state)
-        print(f"step 0 cost={float(c):.8f}")
-
-        history_every = max(1, int(self.config.adam_steps) // 20)
-        for i in range(1, int(self.config.adam_steps)):
+        n_steps = int(self.config.adam_steps)
+        log_at = _optax_log_steps(n_steps, self.config.adam_log_every)
+        print(
+            f"  history log: {len(log_at)} / {n_steps} steps "
+            f"(adam_log_every={max(1, int(self.config.adam_log_every))})"
+        )
+        for i in range(n_steps):
             x, opt_state, c = step(x, opt_state)
-            if i % history_every == 0 or i == int(self.config.adam_steps) - 1:
-                knobs = _x_to_knobs(np.asarray(x))
-                _, metrics = self.cost_from_knobs(knobs)
-                metrics["eval"] = len(self.eval_history)
-                metrics["cost"] = float(c)
-                self.eval_history.append(metrics)
-                self.history.append(
-                    {
-                        "iteration": i,
-                        **{k: v for k, v in metrics.items() if k != "eval"},
-                    }
-                )
-                print(
-                    f"  step {i:4d}  cost={float(c):.8f}  "
-                    f"Fc={metrics['process_fidelity']:.5f}  "
-                    f"spread={metrics.get('fidelity_spread', float('nan')):.5f}"
-                )
-        return _x_to_knobs(np.asarray(x))
+            if i not in log_at:
+                continue
+            knobs = quantize_amp_knobs(_x_to_knobs(np.asarray(x)), self._amp_step_mhz)
+            _, metrics = self.cost_from_knobs(knobs)
+            metrics["eval"] = len(self.eval_history)
+            metrics["cost"] = float(c)
+            self.eval_history.append(metrics)
+            self.history.append(
+                {
+                    "iteration": i,
+                    **{k: v for k, v in metrics.items() if k != "eval"},
+                }
+            )
+            print(
+                f"  step {i:4d}  cost={float(c):.8f}  "
+                f"Fc={metrics['process_fidelity']:.5f}  "
+                f"spread={metrics.get('fidelity_spread', float('nan')):.5f}"
+            )
+        return quantize_amp_knobs(_x_to_knobs(np.asarray(x)), self._amp_step_mhz)
 
     def evaluate_seed(self) -> dict:
         _, metrics = self.cost_from_knobs(self.flat_knobs_seed)
@@ -1039,6 +1084,11 @@ class RobustCRGrapeOptimizer:
         )
         if self.fidelity_metric == "mean_minus_spread":
             print(f"  spread_penalty_lambda = {self.config.spread_penalty_lambda:.4g}")
+        if self._amp_step_mhz is not None:
+            print(
+                f"  Amp grid: step={self.config.amp_step_khz:g} kHz "
+                f"({self._amp_step_mhz:g} MHz) on I/Q knobs"
+            )
         seed_metrics = self.evaluate_seed()
         print("Seed metrics:")
         _print_metrics(seed_metrics, self.shifts)
@@ -1051,15 +1101,13 @@ class RobustCRGrapeOptimizer:
             bound = float(self.config.amp_bound_mhz)
             bounds = [(-bound, bound)] * x0.size
 
-            if self.config.use_jax_grad and self.config.optimizer == "adam":
-                flat_knobs_opt = self._run_adam(x0, bounds)
+            if (
+                self.config.use_jax_grad
+                and _normalize_optimizer(self.config.optimizer) in FIRST_ORDER_OPTIMIZERS
+            ):
+                flat_knobs_opt = self._run_optax(x0, bounds)
                 scipy_result = None
             else:
-                if self.config.optimizer == "adam":
-                    raise ValueError(
-                        "optimizer='adam' requires use_jax_grad=True "
-                        "(robust Adam uses the batched dynamiqs cost)"
-                    )
                 if self.config.use_jax_grad:
                     maxfun = int(self.config.maxiter * 30)
                     fun = self._cost_and_grad
@@ -1119,6 +1167,7 @@ class RobustCRGrapeOptimizer:
         else:
             print("\noptimize=False: seed metrics only (no L-BFGS-B).")
 
+        flat_knobs_opt = quantize_amp_knobs(flat_knobs_opt, self._amp_step_mhz)
         _, final_metrics = self.cost_from_knobs(flat_knobs_opt)
         cr_half_opt = self.assemble_half(flat_knobs_opt)
 
@@ -1179,6 +1228,7 @@ def optimize_robust_cr_grape(
     n_link_samples: int = 8,
     target_gate: str | None = None,
     amp_bound_mhz: float = 48.0,
+    amp_step_khz: float | None = None,
     maxiter: int = 80,
     qubit_pair: list[int] | None = None,
     n_levels: int = 3,
@@ -1192,6 +1242,7 @@ def optimize_robust_cr_grape(
     optimizer: str = "lbfgs",
     adam_lr: float = 0.02,
     adam_steps: int = 200,
+    adam_log_every: int = 1,
     evolution: str = "comp",
 ) -> RobustGrapeResult:
     """User-facing entry point for robust (multi-detuning) echoed CR GRAPE.
@@ -1202,7 +1253,7 @@ def optimize_robust_cr_grape(
     to equal ``1/N``.
 
     Set ``use_jax_grad=True`` for one dynamiqs experiment with batched frames
-    and SciPy ``jac=True`` (L-BFGS) or ``optimizer='adam'`` (optax).
+    and SciPy ``jac=True`` (L-BFGS) or ``optimizer='adam'`` / ``'adan'`` (optax).
     """
     config = RobustCRGrapeConfig(
         flat_len_ns=flat_len_ns,
@@ -1218,6 +1269,7 @@ def optimize_robust_cr_grape(
         spread_penalty_lambda=spread_penalty_lambda,
         target_gate=target_gate,
         amp_bound_mhz=amp_bound_mhz,
+        amp_step_khz=amp_step_khz,
         maxiter=maxiter,
         qubit_pair=qubit_pair or [1, 2],
         n_levels=n_levels,
@@ -1229,6 +1281,7 @@ def optimize_robust_cr_grape(
         optimizer=optimizer,
         adam_lr=adam_lr,
         adam_steps=adam_steps,
+        adam_log_every=adam_log_every,
         evolution=evolution,
     )
     opt = RobustCRGrapeOptimizer(config, exps=exps)
