@@ -77,6 +77,8 @@ class TwoQubitSimulatorBase:
         echoed_cr (bool):      flag carried by the CR experiments. Default False.
         nshots (int):          shots used when sampling measurement counts. Default 8192.
         dt_sample_ns (float):  simulation clock in ns. Default 4 (OPX clock).
+        envelope:              dynamiqs only. ``"identity"`` (default), ``"lp_350mhz"``,
+                               or a factory ``(knobs, dt_us) -> envelope(t)``.
     """
 
     def __init__(self, qubit_pair=[1, 2], **kwargs):
@@ -95,7 +97,7 @@ class TwoQubitSimulatorBase:
         self.J_MHz = coupling_vals[f"c{self.q_pair[0]}_t{self.q_pair[1]}"]["J_mhz"]
         self.nshots = int(kwargs.get("nshots", 8192))
         simulator_cls = _resolve_engine(self.engine)
-        self.simulator = simulator_cls(
+        sim_kwargs = dict(
             qubits=self.qubits,
             J_MHz=self.J_MHz,
             drive_lines=self.drive_lines,
@@ -103,6 +105,13 @@ class TwoQubitSimulatorBase:
             dt_sample_ns=self.dt_sample_ns,
             n_sub=self.n_sub,
         )
+        if self.engine == "dynamiqs":
+            sim_kwargs["envelope"] = kwargs.get("envelope", "identity")
+        elif kwargs.get("envelope") is not None:
+            raise ValueError(
+                "envelope filters are wired on the dynamiqs engine only"
+            )
+        self.simulator = simulator_cls(**sim_kwargs)
         self.channels = list[str](self.simulator.drive_lines)
 
     def delta_qq_MHz(self, q_pair):

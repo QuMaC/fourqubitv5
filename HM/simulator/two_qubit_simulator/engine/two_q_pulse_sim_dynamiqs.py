@@ -9,9 +9,13 @@ Hamiltonian structure
 ---------------------
   - Static drift: anharmonicities only (each qubit in its own frame).
   - Coupling: ``dq.modulated`` carrier phases at the qubit-qubit detuning.
-  - Drives: OPX piecewise-constant envelopes indexed inside ``dq.modulated``
-    callbacks (equivalent to ``dq.pwc`` envelope × ``dq.modulated`` carrier,
-    which dynamiqs does not combine with ``*`` on distinct operators).
+  - Drives: envelopes evaluated inside ``dq.modulated`` callbacks, then
+    multiplied by the carrier. The default envelope holds each DAC sample
+    flat. ``envelope="lp_350mhz"`` (or any factory from
+    ``engine/envelope_filters.py``) replaces that hold with a continuous
+    transfer function. Dynamiqs does not combine ``dq.pwc`` and
+    ``dq.modulated`` with ``*`` on distinct operators, so the envelope is
+    indexed inside the callback.
 
 Units match the qutip engine: frequencies in MHz, Hamiltonian in angular units
 (2π baked in), evolution time in µs (``t_us = t_ns * 1e-3``).
@@ -26,6 +30,7 @@ Schödinger solves. Double precision is set at import
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Sequence
 
 import dynamiqs as dq
@@ -34,6 +39,9 @@ import jax.numpy as jnp
 import numpy as np
 
 from HM.simulator.two_qubit_simulator.engine.constants import DT_SAMPLE_NS, TWOPI
+from HM.simulator.two_qubit_simulator.engine.envelope_filters import (
+    resolve_envelope,
+)
 
 if TYPE_CHECKING:
     from HM.simulator.two_qubit_simulator.base_classes.device_base import (
@@ -77,6 +85,7 @@ class TwoQubitPulseSimulatorDynamiqs:
         progress_meter: bool = False,
         integrator_tol: float = 1e-10,
         integrator_max_steps: int = 1_000_000,
+        envelope: str | Callable = "identity",
     ):
         assert len(qubits) == 2, "this sim is hard-wired to 2 qubits"
         # Precision is set at import by _configure_jax() (dq.set_precision
@@ -94,6 +103,10 @@ class TwoQubitPulseSimulatorDynamiqs:
         self.n_sub = n_sub  # kept for API parity with the qutip engine; unused here
         self.dt_sample_ns = float(dt_sample_ns)
         self.dt_sample_us = self.dt_sample_ns * 1e-3
+        # Name or factory. Resolved on each shot so assigning this swaps the
+        # transfer function without rebuilding the device.
+        resolve_envelope(envelope)
+        self.envelope = envelope
         self.dims = [q.n_levels for q in qubits]
         self.dim = self.dims[0] * self.dims[1]
         self.set_target_frame(self.qubits[1].frame_MHz)
@@ -201,20 +214,13 @@ class TwoQubitPulseSimulatorDynamiqs:
         dl = self.drive_lines[name]
         delta = dl.carrier_MHz - self.qubits[dl.target].frame_MHz
         ad_op, a_op = self._drive_ops[name]
-        n_eps = eps_arr.shape[0]
-        dt_us = self.dt_sample_us
-
-        def sample_index(t: float) -> jnp.ndarray:
-            i = jnp.floor(t / dt_us).astype(jnp.int32)
-            return jnp.clip(i, 0, n_eps - 1)
+        envelope = resolve_envelope(self.envelope)(eps_arr, self.dt_sample_us)
 
         def coeff_ad(t: float) -> jnp.ndarray:
-            eps = eps_arr[sample_index(t)]
-            return eps * jnp.exp(-1j * TWOPI * delta * t)
+            return envelope(t) * jnp.exp(-1j * TWOPI * delta * t)
 
         def coeff_a(t: float) -> jnp.ndarray:
-            eps = eps_arr[sample_index(t)]
-            return jnp.conj(eps) * jnp.exp(1j * TWOPI * delta * t)
+            return jnp.conj(envelope(t)) * jnp.exp(1j * TWOPI * delta * t)
 
         ad_term = dq.modulated(
             coeff_ad,
@@ -241,13 +247,14 @@ class TwoQubitPulseSimulatorDynamiqs:
         return H
 
     def _initial_state(self, psi0: Any | None) -> dq.QArray:
+        dims = tuple(self.dims)
         if psi0 is None:
-            return dq.basis(self.dim, 0)
+            return dq.basis(dims, (0, 0))
         if hasattr(psi0, "full"):
             vec = np.asarray(psi0.full(), dtype=complex).reshape(self.dim, 1)
         else:
             vec = np.asarray(psi0, dtype=complex).reshape(self.dim, 1)
-        return dq.asqarray(jnp.array(vec))
+        return dq.asqarray(jnp.array(vec), dims=dims)
 
     def _wrap_state(self, state: dq.QArray | jnp.ndarray) -> _DynamiqsState:
         if hasattr(state, "to_jax"):
@@ -324,7 +331,7 @@ class TwoQubitPulseSimulatorDynamiqs:
         vecs = np.asarray(psi0_batch, dtype=complex)
         if vecs.ndim == 2:
             vecs = vecs[:, :, np.newaxis]
-        y0 = dq.asqarray(jnp.array(vecs))
+        y0 = dq.asqarray(jnp.array(vecs), dims=tuple(self.dims))
         tsave = jnp.array([0.0, L * self.dt_sample_us])
         result = dq.sesolve(
             H,
