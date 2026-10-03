@@ -13,7 +13,9 @@ time-resolved observables plus the full state vector at every sample boundary.
 CR convenience wrapper
 ----------------------
 ``CR_pulse_evolution`` builds a CR (or echoed-CR) timeline via the same pulse
-machinery as ``cr_len_sweep``, then calls ``evolve_timeline``.
+machinery as ``cr_len_sweep``, then calls ``evolve_timeline``. Pass
+``engine='qutip'`` (default) or ``engine='dynamiqs'`` the same way as
+``CR_len_sweep`` / the GRAPE robust tests.
 
 Outputs land in ``sim_media/`` with a ``ddmmyyyy`` date suffix on each filename.
 """
@@ -78,21 +80,38 @@ def _timeline_length(timeline: dict[str, np.ndarray]) -> int:
 
 
 def _pauli_ops(simulator):
-    """Control- and target-qubit Pauli X/Y/Z on the joint Hilbert space."""
+    """Control- and target-qubit Pauli X/Y/Z as dense numpy matrices.
+
+    Stored as arrays so ``<P>`` works for both QuTiP ``Qobj`` and dynamiqs
+    ``_DynamiqsState`` (neither engine's ket is required by ``qt.expect``).
+    """
     n0, n1 = simulator.dims
     I0, I1 = qt.qeye(n0), qt.qeye(n1)
     ops = {}
     for which in ("X", "Y", "Z"):
         P0 = pauli_on_levels(which, n0)
         P1 = pauli_on_levels(which, n1)
-        ops[f"ctrl_{which}"] = qt.tensor(P0, I1)
-        ops[f"tgt_{which}"] = qt.tensor(I0, P1)
+        ops[f"ctrl_{which}"] = np.asarray(qt.tensor(P0, I1).full(), dtype=complex)
+        ops[f"tgt_{which}"] = np.asarray(qt.tensor(I0, P1).full(), dtype=complex)
     return ops
+
+
+def _ket_vector(psi):
+    """Flatten a ket from either engine to a 1-d complex ndarray."""
+    if hasattr(psi, "full"):
+        return np.asarray(psi.full(), dtype=complex).reshape(-1)
+    return np.asarray(psi, dtype=complex).reshape(-1)
+
+
+def _expect(op, psi):
+    """Real expectation ``<psi|op|psi>`` from a dense matrix and a ket vector."""
+    vec = _ket_vector(psi)
+    return float(np.real(np.vdot(vec, op @ vec)))
 
 
 def _observables_at_step(psi, simulator, pauli_ops):
     """Extract full-state and reduced observables from one ket."""
-    vec = np.asarray(psi.full(), dtype=complex).reshape(-1)
+    vec = _ket_vector(psi)
     n0, n1 = simulator.dims
     comp_idx = list(simulator.comp_idx)
 
@@ -110,7 +129,7 @@ def _observables_at_step(psi, simulator, pauli_ops):
         "level_labels": level_labels,
     }
     for key, op in pauli_ops.items():
-        obs[key] = float(np.real(qt.expect(op, psi)))
+        obs[key] = _expect(op, psi)
     return obs
 
 
@@ -143,7 +162,7 @@ def evolve_timeline(
     Parameters
     ----------
     simulator
-        ``TwoQubitPulseSimulator`` (or dynamiqs wrapper with the same API).
+        ``TwoQubitPulseSimulator`` or ``TwoQubitPulseSimulatorDynamiqs``.
     timeline
         ``Timeline`` builder or finalized ``dict[channel, complex envelope]``.
     dt_sample_ns
@@ -239,19 +258,33 @@ def plot_and_save_all(
     bloch_qubit="tgt",
     gif_fps=12,
     max_gif_frames=120,
+    bloch_elev=22,
+    bloch_azim=-58,
 ):
-    """Write population, XYZ, Bloch PNG/GIF, and optional JSON to sim_media."""
+    """Write population, XYZ, Bloch PNG/GIF, and optional JSON to sim_media.
+
+    ``bloch_azim=-58`` looks between the Bloch X and Y axes. ``azim=0`` looks
+    straight down X and hides the ZX arc.
+    """
     suffix = f"_{tag}_{_date_tag()}" if tag else f"_{_date_tag()}"
     paths = {
         "populations": plot_populations(results, f"cr_pulse_evolution_populations{suffix}.png"),
         "xyz": plot_xyz(results, f"cr_pulse_evolution_xyz{suffix}.png"),
-        "bloch_png": save_bloch_png(results, f"cr_pulse_evolution_bloch{suffix}.png", qubit=bloch_qubit),
+        "bloch_png": save_bloch_png(
+            results,
+            f"cr_pulse_evolution_bloch{suffix}.png",
+            qubit=bloch_qubit,
+            elev=bloch_elev,
+            azim=bloch_azim,
+        ),
         "bloch_gif": save_bloch_gif(
             results,
             f"cr_pulse_evolution_bloch{suffix}.gif",
             qubit=bloch_qubit,
             fps=gif_fps,
             max_gif_frames=max_gif_frames,
+            elev=bloch_elev,
+            azim=bloch_azim,
         ),
     }
     if save_json:
@@ -391,10 +424,11 @@ class CR_pulse_evolution(CR_len_sweep):
         src = f"arb npz ({self.arb_mode})" if used_arb else "CR params"
         print(f"Timeline duration: {_timeline_length(timeline) * self.dt_sample_ns:.1f} ns"
               f"  |  dt = {self.dt_sample_ns:g} ns  |  echoed = {self.echoed_cr}"
-              f"  |  source = {src}")
+              f"  |  engine = {self.engine}  |  source = {src}")
         self.results = evolve_timeline(self.simulator, timeline, dt_sample_ns=self.dt_sample_ns)
         self.results["metadata"] = {
             "q_pair": self.q_pair,
+            "engine": self.engine,
             "echoed_cr": self.echoed_cr,
             "cr_pulse_params": self.cr_pulse_params,
             "x_pi_pulse_params": self.x_pi_pulse_params,
@@ -415,6 +449,8 @@ class CR_pulse_evolution(CR_len_sweep):
                 save_json=save_json,
                 gif_fps=self.bloch_gif_fps,
                 max_gif_frames=self.max_gif_frames,
+                bloch_elev=self.bloch_view_elev,
+                bloch_azim=self.bloch_view_azim,
             )
         return self.results
 
@@ -455,8 +491,11 @@ def perform_arb_pulse_evolution(
 
 
 if __name__ == "__main__":
+    # Same engine switch as CR_len_sweep / grape robust tests.
+    ENGINE = "dynamiqs"  # "qutip" or "dynamiqs"
+
     # Set to a path to evolve a GRAPE-optimized (or any) waveform from an npz
-    # file; leave as None to evolve the analytic CR pulse below.
+    # file; leave as None / False to evolve the analytic CR pulse below.
     ARB_NPZ_PATH = os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
         "optimization", "optimization_tests", "results", "cr_grape_pulse.npz",
@@ -471,26 +510,29 @@ if __name__ == "__main__":
             echoed_cr=True,
             n_levels=n_levels,
             n_sub=16,
-            file_tag=f"arb_grape_echoed_cr_n_levels_{n_levels}_det0p15MHz",
+            engine=ENGINE,
+            file_tag=f"arb_grape_echoed_cr_n_levels_{n_levels}_det0p15MHz_{ENGINE}",
         )
     else:
         cr_pulse_params = {
-            "amp_mhz": 32.0,
+            "amp_mhz": 21.0,
             "t_rise_ns": int(16),
             "phase_rad": 0,
         }
         echoed_cr = True
-        n_levels = 3
+        n_levels = 4
         file_tag = (
             f"amp_{cr_pulse_params['amp_mhz']}_t_rise_{cr_pulse_params['t_rise_ns']}"
-            f"_ph_{cr_pulse_params['phase_rad']}_echoed_cr_{echoed_cr}_n_levels_{n_levels}"
+            f"_ph_{cr_pulse_params['phase_rad']}_echoed_cr_{echoed_cr}"
+            f"_n_levels_{n_levels}_{ENGINE}"
         )
         perform_cr_pulse_evolution(
             q_pair=[1, 2],
-            flat_len_ns=84.0,
+            flat_len_ns=122.0,
             cr_pulse_params=cr_pulse_params,
             echoed_cr=echoed_cr,
             n_levels=n_levels,
-            n_sub=2,
+            n_sub=16,
+            engine=ENGINE,
             file_tag=file_tag,
         )

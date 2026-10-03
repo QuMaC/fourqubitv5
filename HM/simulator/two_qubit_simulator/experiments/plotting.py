@@ -193,6 +193,8 @@ def save_bloch_gif(
     fps=12,
     max_gif_frames=120,
     title=None,
+    elev=22,
+    azim=-58,
 ):
     """Animated 2x1 Bloch trajectories (ctrl off | ctrl on) during the pulse."""
     filename = _media_path(filename or f"cr_pulse_evolution_bloch_{_date_tag()}.gif")
@@ -214,7 +216,7 @@ def save_bloch_gif(
     fig, axes = plt.subplots(2, 1, figsize=(6, 10), subplot_kw={"projection": "3d"})
     path_artists = []
     for ax, ctrl in zip(axes, (0, 1)):
-        draw_bloch_sphere(ax)
+        draw_bloch_sphere(ax, elev=elev, azim=azim)
         ax.set_title(CTRL_LABELS[ctrl], color=CTRL_COLORS[ctrl], fontsize=11)
         xs, ys, zs = trajectories[ctrl]
         color = CTRL_COLORS[ctrl]
@@ -258,7 +260,7 @@ def save_bloch_gif(
     return filename
 
 
-def save_bloch_png(results, filename=None, qubit="tgt", title=None):
+def save_bloch_png(results, filename=None, qubit="tgt", title=None, *, elev=22, azim=-58):
     """Static 2×1 Bloch trajectories at full pulse duration."""
     filename = _media_path(filename or f"cr_pulse_evolution_bloch_{_date_tag()}.png")
     prefix = f"{qubit}_"
@@ -269,7 +271,7 @@ def save_bloch_png(results, filename=None, qubit="tgt", title=None):
         data = results[f"control_{ctrl}"]
         xs, ys, zs = data[f"{prefix}X"], data[f"{prefix}Y"], data[f"{prefix}Z"]
         color = CTRL_COLORS[ctrl]
-        draw_bloch_sphere(ax)
+        draw_bloch_sphere(ax, elev=elev, azim=azim)
         plot_bloch_path(ax, xs, ys, zs, color=color, show_markers=False)
         ax.scatter(xs[0], ys[0], zs[0], color=color, s=36, marker="o", alpha=0.55, label="start")
         ax.scatter(xs[-1], ys[-1], zs[-1], color=color, s=64, marker="*", label="end")
