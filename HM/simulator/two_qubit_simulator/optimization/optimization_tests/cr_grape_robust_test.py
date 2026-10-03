@@ -30,7 +30,7 @@ os.makedirs(RESULTS_DIR, exist_ok=True)
 # Used when USE_SEED_NPZ is False (or SEED_NPZ is unset).
 CR_PULSE_PARAMS = {"amp_mhz": 21, "t_rise_ns": 16, "phase_rad": 0.0}
 FLAT_LEN_NS = 122.0
-N_FLAT_KNOBS = 122  # 46
+N_FLAT_KNOBS = 61  # 46
 N_LINK_SAMPLES = 8
 
 # Warm-start from a prior robust result NPZ (loads flat_knobs_opt).
@@ -44,7 +44,7 @@ SEED_NPZ = os.path.join(
 # Multi-detuning setup.
 # - If SHIFTS_MHZ is None: cases are +/- ZZ_SHIFT_MHZ/2 (two points).
 # - Else: any list, e.g. [-0.15, 0.0, 0.15] or [-0.2, -0.15, 0.15, 0.2].
-ZZ_SHIFT_MHZ = 0.15
+ZZ_SHIFT_MHZ = 0.3
 SHIFTS_MHZ = None  # e.g. [-0.2, -0.15, 0.15, 0.2]; None → +/- ZZ_SHIFT_MHZ/2
 # Per-shift weights (length must match N). None → equal 1/N.
 WEIGHTS = None
@@ -58,14 +58,15 @@ FIDELITY_METRIC: FidelityMetric = "mean_minus_spread"
 SPREAD_PENALTY_LAMBDA = 0.3
 
 TARGET_GATE = "zx_m90"  # inferred from seed; or "zx_90" / "zx_m90"
-AMP_BOUND_MHZ = 48
+AMP_BOUND_MHZ = 100
 AMP_STEP_KHZ = 0.55  # I/Q amp grid; None = continuous (MHz units)
 MAXITER = 300
 OPTIMIZE = True  # set True for a real L-BFGS / Adam / Adan run
-
+filter = "lp_350mhz"
+# filter = "identity"
 
 # "lbfgs" (default), "adam", or "adan"; adam/adan require USE_JAX_GRAD=True.
-OPTIMIZER = "adan"
+OPTIMIZER = "lbfgs"
 ADAM_LR = 0.04
 ADAM_STEPS = 360
 EVOLUTION = "comp"  # robust JAX path locks "comp"
@@ -134,6 +135,7 @@ def run_robust_cr_grape() -> None:
         adam_lr=ADAM_LR,
         adam_steps=ADAM_STEPS,
         evolution=EVOLUTION,
+        envelope=filter,
     )
 
     flat_knobs_seed = _load_flat_knobs_seed()

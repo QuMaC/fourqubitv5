@@ -36,10 +36,12 @@ from tqdm import tqdm
 import jax
 import jax.numpy as jnp
 
+from HM.simulator.two_qubit_simulator.engine.envelope_filters import (
+    envelope_name,
+    sample_envelope,
+)
 from HM.simulator.two_qubit_simulator.engine.pulses import (
     assemble_cr_half_from_flat_knobs,
-    expand_samples_held_nsub,
-    scale_sample_index,
     seed_flat_knobs_from_calibrated_cr,
 )
 from HM.simulator.two_qubit_simulator.engine.pulses_jax import (
@@ -252,6 +254,8 @@ class RobustCRGrapeConfig:
     """Record history every N first-order steps (1 = every step). Always logs first and last."""
     evolution: str = "comp"
     """comp only for JAX robust path."""
+    envelope: str = "identity"
+    """Dynamiqs drive filter. ``identity`` or ``lp_350mhz``. Ignored by QuTiP."""
 
     def resolved_shifts(self) -> list[float]:
         if self.shifts_mhz is not None:
@@ -501,34 +505,30 @@ class RobustGrapeResult:
         plt.close(fig)
 
     def plot_waveform(self, out_png: str) -> None:
-        dt = self.exps[0].dt_sample_ns if self.exps else 1.0
-        n_sub = int(self.exps[0].simulator.n_sub) if self.exps else 2
+        exp0 = self.exps[0] if self.exps else None
+        dt = exp0.dt_sample_ns if exp0 else 1.0
+        envelope = getattr(getattr(exp0, "simulator", None), "envelope", "identity")
+        label = envelope_name(envelope)
         rs, re = self.half_slices["rise"]
         fs, fe = self.half_slices["flat"]
         ds, de = self.half_slices["fall"]
 
-        t, seed_exp = expand_samples_held_nsub(self.cr_half_seed, dt, n_sub)
-        _, opt_exp = expand_samples_held_nsub(self.cr_half_opt, dt, n_sub)
-        rs_e, re_e = scale_sample_index(rs, n_sub), scale_sample_index(re, n_sub)
-        fs_e, fe_e = scale_sample_index(fs, n_sub), scale_sample_index(fe, n_sub)
-        ds_e, de_e = scale_sample_index(ds, n_sub), scale_sample_index(de, n_sub)
+        t, seed_y = sample_envelope(envelope, self.cr_half_seed, dt)
+        _, opt_y = sample_envelope(envelope, self.cr_half_opt, dt)
 
         fig, axes = plt.subplots(2, 1, figsize=(10, 6.5), sharex=True)
-        for ax, key in zip(axes, ("I", "Q")):
-            seed_y = seed_exp.real if key == "I" else seed_exp.imag
-            opt_y = opt_exp.real if key == "I" else opt_exp.imag
-            ax.plot(t, seed_y, color="0.65", lw=1.2, ls="--", label=f"seed {key} (MHz)")
-            ax.plot(t, opt_y, color="tab:green", lw=1.6, label=f"opt {key} (MHz)")
-            ax.axvspan(t[rs_e], t[re_e - 1] if re_e > rs_e else t[rs_e], color="tab:blue", alpha=0.08)
-            ax.axvspan(t[fs_e], t[fe_e - 1] if fe_e > fs_e else t[fs_e], color="tab:orange", alpha=0.08)
-            ax.axvspan(t[ds_e], t[de_e - 1] if de_e > ds_e else t[ds_e], color="tab:purple", alpha=0.08)
+        for ax, key, part in zip(axes, ("I", "Q"), (np.real, np.imag)):
+            ax.plot(t, part(seed_y), color="0.65", lw=1.2, ls="--", label=f"seed {key} (MHz)")
+            ax.plot(t, part(opt_y), color="tab:green", lw=1.6, label=f"opt {key} (MHz)")
+            ax.axvspan(rs * dt, re * dt, color="tab:blue", alpha=0.08)
+            ax.axvspan(fs * dt, fe * dt, color="tab:orange", alpha=0.08)
+            ax.axvspan(ds * dt, de * dt, color="tab:purple", alpha=0.08)
             ax.set_ylabel(f"{key} (MHz)")
             ax.grid(alpha=0.35)
             ax.legend(fontsize=8, loc="upper right")
 
         axes[1].set_xlabel(
-            f"time within one CR half (ns)  |  held at n_sub={n_sub}  "
-            f"(dt_sub={dt / n_sub:g} ns)"
+            f"time within one CR half (ns)  |  envelope={label}  |  dt={dt:g} ns"
         )
         s = self.seed_metrics
         f = self.final_metrics
@@ -553,8 +553,8 @@ class RobustGrapeResult:
             f"{_fi_line(f, 'final')}"
         )
         axes[0].set_title(
-            "Robust CR half: seed vs optimized "
-            f"(shaded: rise / flat / fall; each sample held ×{n_sub})"
+            "Robust CR half envelope seen by sesolve: seed vs optimized "
+            f"({label}; shaded: rise / flat / fall)"
             f"{amp_grid_plot_tag(self.config.amp_step_khz)}"
         )
         fig.text(0.01, 0.005, summary, ha="left", va="bottom", fontsize=8,
@@ -601,6 +601,7 @@ def _build_lab_exp(config: RobustCRGrapeConfig) -> CR_len_sweep:
         n_levels=int(config.n_levels),
         engine="dynamiqs",
         n_sub=int(config.n_sub),
+        envelope=config.envelope,
         cr_pulse_params=cr_pulse_params,
     )
 

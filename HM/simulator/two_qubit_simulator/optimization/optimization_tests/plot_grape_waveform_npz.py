@@ -23,9 +23,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 
-from HM.simulator.two_qubit_simulator.engine.pulses import (
-    expand_samples_held_nsub,
-    scale_sample_index,
+from HM.simulator.two_qubit_simulator.engine.envelope_filters import (
+    envelope_name,
+    sample_envelope,
 )
 
 
@@ -89,6 +89,7 @@ def plot_npz_waveform(
     out_png: Path,
     ylim: float | None = None,
     n_sub: int = 2,
+    envelope: str | object = "identity",
 ) -> Path:
     with np.load(npz_path, allow_pickle=False) as d:
         required = [
@@ -129,43 +130,40 @@ def plot_npz_waveform(
     if not (len(seed_i) == len(seed_q) == len(opt_i) == len(opt_q) == len(t_sample)):
         raise ValueError("Waveform arrays and time axis have inconsistent lengths")
 
-    n_sub = max(1, int(n_sub))
-    t, seed_i_e = expand_samples_held_nsub(seed_i, dt, n_sub)
-    _, seed_q_e = expand_samples_held_nsub(seed_q, dt, n_sub)
-    _, opt_i_e = expand_samples_held_nsub(opt_i, dt, n_sub)
-    _, opt_q_e = expand_samples_held_nsub(opt_q, dt, n_sub)
-    rs_e = scale_sample_index(rs, n_sub)
-    fs_e = scale_sample_index(fs, n_sub)
-    fe_e = scale_sample_index(fe, n_sub)
-    ds_e = scale_sample_index(ds, n_sub)
-    de_e = len(t)
+    # n_sub used to redraw the DAC hold on a finer grid. The curve is now the
+    # envelope sesolve evaluates, so the solver sample dt is the one that matters.
+    del n_sub
+    env_label = envelope_name(envelope)
+    seed = seed_i + 1j * seed_q
+    opt = opt_i + 1j * opt_q
+    t, seed_y = sample_envelope(envelope, seed, dt)
+    _, opt_y = sample_envelope(envelope, opt, dt)
 
-    all_vals = np.concatenate([seed_i_e, seed_q_e, opt_i_e, opt_q_e])
+    all_vals = np.concatenate([seed_y.real, seed_y.imag, opt_y.real, opt_y.imag])
     y_lim = _resolved_ylim(ylim, all_vals)
 
     fig, axes = plt.subplots(2, 1, figsize=(10, 6), sharex=True)
     panels = (
-        ("I", seed_i_e, opt_i_e),
-        ("Q", seed_q_e, opt_q_e),
+        ("I", seed_y.real, opt_y.real),
+        ("Q", seed_y.imag, opt_y.imag),
     )
-    for ax, (label, seed_y, opt_y) in zip(axes, panels):
-        ax.plot(t, seed_y, color="0.65", lw=1.2, ls="--", label=f"seed {label} (MHz)")
-        ax.plot(t, opt_y, color="tab:green", lw=1.6, label=f"opt {label} (MHz)")
-        ax.axvspan(t[rs_e], t[fs_e - 1] if fs_e > rs_e else t[rs_e], color="tab:blue", alpha=0.08)
-        ax.axvspan(t[fs_e], t[fe_e - 1] if fe_e > fs_e else t[fs_e], color="tab:orange", alpha=0.08)
-        ax.axvspan(t[ds_e], t[de_e - 1] if de_e > ds_e else t[ds_e], color="tab:purple", alpha=0.08)
+    for ax, (label, seed_part, opt_part) in zip(axes, panels):
+        ax.plot(t, seed_part, color="0.65", lw=1.2, ls="--", label=f"seed {label} (MHz)")
+        ax.plot(t, opt_part, color="tab:green", lw=1.6, label=f"opt {label} (MHz)")
+        ax.axvspan(rs * dt, fs * dt, color="tab:blue", alpha=0.08)
+        ax.axvspan(fs * dt, fe * dt, color="tab:orange", alpha=0.08)
+        ax.axvspan(ds * dt, len(t_sample) * dt, color="tab:purple", alpha=0.08)
         ax.set_ylabel(f"{label} (MHz)")
         ax.set_ylim(-y_lim, y_lim)
         ax.grid(alpha=0.35)
         ax.legend(fontsize=8, loc="upper right")
 
     axes[1].set_xlabel(
-        f"time within one CR half (ns)  |  held at n_sub={n_sub}  "
-        f"(dt_sub={dt / n_sub:g} ns)"
+        f"time within one CR half (ns)  |  envelope={env_label}  |  dt={dt:g} ns"
     )
     axes[0].set_title(
-        f"CR half envelope from {npz_path.name}: seed vs optimized "
-        f"(shared y-limit = ±{y_lim:.3g} MHz; each sample held ×{n_sub})"
+        f"CR half envelope seen by sesolve from {npz_path.name}: seed vs optimized "
+        f"({env_label}; shared y-limit = ±{y_lim:.3g} MHz)"
     )
     fig.text(
         0.99,

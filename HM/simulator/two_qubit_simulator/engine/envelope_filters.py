@@ -27,6 +27,7 @@ from collections.abc import Callable
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 # (knobs, dt_us) -> (t -> complex scalar)
 EnvelopeFactory = Callable
@@ -79,6 +80,8 @@ def single_pole(f_3db_hz: float = 350e6) -> EnvelopeFactory:
 
         return envelope
 
+    mhz = f_3db_hz * 1e-6
+    factory.__name__ = f"single_pole_{mhz:g}MHz"
     return factory
 
 
@@ -104,3 +107,35 @@ def resolve_envelope(envelope: str | EnvelopeFactory) -> EnvelopeFactory:
         "envelope must be a filter name or a factory (knobs, dt_us) -> envelope(t), "
         f"got {type(envelope).__name__}"
     )
+
+
+def envelope_name(envelope: str | EnvelopeFactory) -> str:
+    """Short label for plot titles."""
+    if isinstance(envelope, str):
+        return envelope
+    return getattr(envelope, "__name__", "custom")
+
+
+def sample_envelope(
+    envelope: str | EnvelopeFactory,
+    knobs,
+    dt_ns: float,
+    n_per_bin: int = 16,
+):
+    """Sample the envelope ``sesolve`` evaluates, in nanoseconds.
+
+    ``knobs`` is one channel, complex or real. The filter state starts at 0,
+    which is what the solver does at the start of a timeline. Returns
+    ``(t_ns, values)`` with ``values`` complex and the same length as ``t_ns``.
+    The last time is the right edge of the last sample.
+    """
+    knobs = jnp.asarray(knobs).reshape(-1)
+    if not jnp.iscomplexobj(knobs):
+        knobs = knobs.astype(jnp.complex128)
+    dt_ns = float(dt_ns)
+    dt_us = dt_ns * 1e-3
+    n_bins = int(knobs.shape[0])
+    n_per_bin = max(1, int(n_per_bin))
+    t_ns = jnp.linspace(0.0, n_bins * dt_ns, n_bins * n_per_bin + 1)
+    values = resolve_envelope(envelope)(knobs, dt_us)(t_ns * 1e-3)
+    return np.asarray(t_ns), np.asarray(values)
