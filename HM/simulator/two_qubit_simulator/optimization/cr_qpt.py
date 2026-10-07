@@ -102,6 +102,7 @@ def plot_city(
     fidelity: float | None = None,
     color_cutoff: float | None = None,
     color_gamma: float = 0.5,
+    zlim: tuple[float, float] | None = None,
 ) -> str:
     """Real/imaginary 3d bar plot in the style of Qiskit's ``plot_state_city``.
 
@@ -116,6 +117,9 @@ def plot_city(
     ``color_cutoff=None`` saturates at the largest bar that is at least 4 times
     below the peak, so the dominant terms stay fully dark and the error bars
     use the whole light-to-dark range.
+
+    ``zlim`` replaces the per-figure vertical range. A flat-top / optimized pair
+    passes the same limits, taken from whichever matrix extends further.
     """
     data = np.asarray(matrix, dtype=complex)
     if data.ndim != 2 or data.shape[0] != data.shape[1]:
@@ -140,10 +144,10 @@ def plot_city(
     dx = np.full(n * n, 0.5)
     dy = dx.copy()
 
-    zmin = float(min(real.min(), imag.min(), 0.0))
-    zmax = float(max(real.max(), imag.max(), 0.0))
-    if zmax - zmin < 1e-9:
-        zmax = zmin + 1.0
+    if zlim is None:
+        zmin, zmax = _city_zlim([data])
+    else:
+        zmin, zmax = float(zlim[0]), float(zlim[1])
     peak, sat = _color_saturation(real, imag, color_cutoff)
     if color_gamma <= 0:
         raise ValueError(f"color_gamma must be positive, got {color_gamma}")
@@ -213,23 +217,32 @@ def plot_qpt(
     keys = list(WHICH_CHOICES[:-1]) if which == "all" else [which]
     paths: list[str] = []
     for key in keys:
+        groups: dict[float, list[dict]] = {}
         for case in record["cases"]:
-            matrix, labels, symbol = _select_matrix(key, case, record)
-            title = f"{case['title']}    {key}"
-            tag = _fmt_mhz(case["shift_mhz"])
-            out_png = directory / f"{stem}_qpt_{key}_{case['pulse']}_{tag}.png"
-            plot_city(
-                matrix,
-                labels,
-                title,
-                str(out_png),
-                symbol,
-                fidelity=case.get("process_fidelity"),
-                color_cutoff=color_cutoff,
-                color_gamma=color_gamma,
-            )
-            paths.append(str(out_png))
-            print(f"Saved {out_png}")
+            groups.setdefault(float(case["shift_mhz"]), []).append(case)
+        for shift, group in groups.items():
+            matrices = [_select_matrix(key, case, record)[0] for case in group]
+            # One vertical scale for every pulse at this shift (flat-top and
+            # optimized). The wider of the two sets the limits.
+            zlim = _city_zlim(matrices)
+            for case in group:
+                matrix, labels, symbol = _select_matrix(key, case, record)
+                title = f"{case['title']}    {key}"
+                tag = _fmt_mhz(shift)
+                out_png = directory / f"{stem}_qpt_{key}_{case['pulse']}_{tag}.png"
+                plot_city(
+                    matrix,
+                    labels,
+                    title,
+                    str(out_png),
+                    symbol,
+                    fidelity=case.get("process_fidelity"),
+                    color_cutoff=color_cutoff,
+                    color_gamma=color_gamma,
+                    zlim=zlim,
+                )
+                paths.append(str(out_png))
+                print(f"Saved {out_png}")
     return paths
 
 
@@ -428,6 +441,24 @@ def _transform_to_pauli(data: np.ndarray, n_qubits: int) -> np.ndarray:
             (4 * dim * dim, 4 * dim * dim),
         )
     return (cob @ data @ cob.conj().T) / 2**n_qubits
+
+
+def _city_zlim(matrices: list[np.ndarray]) -> tuple[float, float]:
+    """Shared vertical range. Zero stays inside, and the furthest bar wins."""
+    pieces = []
+    for matrix in matrices:
+        data = np.asarray(matrix)
+        if np.iscomplexobj(data):
+            pieces.append(np.real(data).ravel())
+            pieces.append(np.imag(data).ravel())
+        else:
+            pieces.append(np.asarray(data, dtype=float).ravel())
+    vals = np.concatenate(pieces) if pieces else np.zeros(1)
+    zmin = float(min(float(np.min(vals)), 0.0))
+    zmax = float(max(float(np.max(vals)), 0.0))
+    if zmax - zmin < 1e-9:
+        zmax = zmin + 1.0
+    return zmin, zmax
 
 
 def _color_saturation(
