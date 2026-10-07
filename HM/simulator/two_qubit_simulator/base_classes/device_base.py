@@ -78,6 +78,7 @@ class TwoQubitSimulatorBase:
         nshots (int):          shots used when sampling measurement counts. Default 8192.
         dt_sample_ns (float):  simulation clock in ns. Default 4 (OPX clock).
         envelope:              dynamiqs only. ``"identity"`` (default), ``"lp_350mhz"``,
+                               ``"bessel4_350mhz"``, ``"butterworth4_350mhz"``,
                                or a factory ``(knobs, dt_us) -> envelope(t)``.
     """
 

@@ -255,7 +255,8 @@ class RobustCRGrapeConfig:
     evolution: str = "comp"
     """comp only for JAX robust path."""
     envelope: str = "identity"
-    """Dynamiqs drive filter. ``identity`` or ``lp_350mhz``. Ignored by QuTiP."""
+    """Dynamiqs drive filter. ``identity``, ``lp_350mhz``, ``bessel4_350mhz``,
+    or ``butterworth4_350mhz``. Ignored by QuTiP."""
 
     def resolved_shifts(self) -> list[float]:
         if self.shifts_mhz is not None:
