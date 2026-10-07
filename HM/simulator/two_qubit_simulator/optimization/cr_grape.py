@@ -27,6 +27,7 @@ from tqdm import tqdm
 from HM.simulator.two_qubit_simulator.engine.envelope_filters import (
     envelope_name,
     sample_envelope,
+    zoh_trace,
 )
 from HM.simulator.two_qubit_simulator.engine.pulses import (
     assemble_cr_half_from_flat_knobs,
@@ -399,10 +400,20 @@ class GrapeResult:
 
         t, seed_y = sample_envelope(envelope, self.cr_half_seed, dt)
         _, opt_y = sample_envelope(envelope, self.cr_half_opt, dt)
+        t_zoh, seed_zoh = zoh_trace(self.cr_half_seed, dt)
+        _, opt_zoh = zoh_trace(self.cr_half_opt, dt)
 
         fig, axes = plt.subplots(2, 1, figsize=(10, 6), sharex=True)
         for ax, key, part in zip(axes, ("I", "Q"), (np.real, np.imag)):
-            ax.plot(t, part(seed_y), color="0.65", lw=1.2, ls="--", label=f"seed {key} (MHz)")
+            ax.step(
+                t_zoh, part(seed_zoh), where="post", color="0.55", lw=0.8,
+                label=f"seed {key} ZOH",
+            )
+            ax.step(
+                t_zoh, part(opt_zoh), where="post", color="tab:green", lw=0.8, alpha=0.45,
+                label=f"opt {key} ZOH",
+            )
+            ax.plot(t, part(seed_y), color="0.35", lw=1.2, ls="--", label=f"seed {key} (MHz)")
             ax.plot(t, part(opt_y), color="tab:green", lw=1.6, label=f"opt {key} (MHz)")
             ax.axvspan(rs * dt, re * dt, color="tab:blue", alpha=0.08)
             ax.axvspan(fs * dt, fe * dt, color="tab:orange", alpha=0.08)
@@ -1059,11 +1070,16 @@ class LoopedGrapeResult:
         fs, fe = ref.half_slices["flat"]
         ds, de = ref.half_slices["fall"]
         t, _ = sample_envelope(envelope, ref.cr_half_opt, dt)
+        t_zoh, avg_zoh = zoh_trace(self.cr_half_avg, dt)
 
         fig, axes = plt.subplots(2, 1, figsize=(11, 7), sharex=True)
         cmap = plt.cm.viridis(np.linspace(0.15, 0.85, self.n_cycles))
 
         for ax, key, part in zip(axes, ("I", "Q"), (np.real, np.imag)):
+            ax.step(
+                t_zoh, part(avg_zoh), where="post", color="0.35", lw=0.8,
+                label="average ZOH", zorder=4,
+            )
             for i, (r, color) in enumerate(zip(self.results, cmap)):
                 _, y = sample_envelope(envelope, r.cr_half_opt, dt)
                 ax.plot(

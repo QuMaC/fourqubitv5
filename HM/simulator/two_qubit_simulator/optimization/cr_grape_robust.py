@@ -39,6 +39,7 @@ import jax.numpy as jnp
 from HM.simulator.two_qubit_simulator.engine.envelope_filters import (
     envelope_name,
     sample_envelope,
+    zoh_trace,
 )
 from HM.simulator.two_qubit_simulator.engine.pulses import (
     assemble_cr_half_from_flat_knobs,
@@ -516,10 +517,20 @@ class RobustGrapeResult:
 
         t, seed_y = sample_envelope(envelope, self.cr_half_seed, dt)
         _, opt_y = sample_envelope(envelope, self.cr_half_opt, dt)
+        t_zoh, seed_zoh = zoh_trace(self.cr_half_seed, dt)
+        _, opt_zoh = zoh_trace(self.cr_half_opt, dt)
 
         fig, axes = plt.subplots(2, 1, figsize=(10, 6.5), sharex=True)
         for ax, key, part in zip(axes, ("I", "Q"), (np.real, np.imag)):
-            ax.plot(t, part(seed_y), color="0.65", lw=1.2, ls="--", label=f"seed {key} (MHz)")
+            ax.step(
+                t_zoh, part(seed_zoh), where="post", color="0.55", lw=0.8,
+                label=f"seed {key} ZOH",
+            )
+            ax.step(
+                t_zoh, part(opt_zoh), where="post", color="tab:green", lw=0.8, alpha=0.45,
+                label=f"opt {key} ZOH",
+            )
+            ax.plot(t, part(seed_y), color="0.35", lw=1.2, ls="--", label=f"seed {key} (MHz)")
             ax.plot(t, part(opt_y), color="tab:green", lw=1.6, label=f"opt {key} (MHz)")
             ax.axvspan(rs * dt, re * dt, color="tab:blue", alpha=0.08)
             ax.axvspan(fs * dt, fe * dt, color="tab:orange", alpha=0.08)

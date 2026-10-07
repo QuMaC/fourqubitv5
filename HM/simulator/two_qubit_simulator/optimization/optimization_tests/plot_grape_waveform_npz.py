@@ -5,6 +5,7 @@ Simple utility to plot a GRAPE CR-half waveform saved in ``cr_grape_pulse.npz``.
 
 The plot matches the style used by ``optimization/cr_grape.py``:
   - seed vs optimized envelopes for I and Q,
+  - the DAC samples as a zero-order hold under each envelope,
   - rise/flat/fall regions shaded in blue/orange/purple.
 
 Unlike the original helper, this utility forces the same symmetric y-limits on
@@ -26,6 +27,7 @@ import numpy as np
 from HM.simulator.two_qubit_simulator.engine.envelope_filters import (
     envelope_name,
     sample_envelope,
+    zoh_trace,
 )
 
 
@@ -138,17 +140,30 @@ def plot_npz_waveform(
     opt = opt_i + 1j * opt_q
     t, seed_y = sample_envelope(envelope, seed, dt)
     _, opt_y = sample_envelope(envelope, opt, dt)
+    t_zoh, seed_zoh = zoh_trace(seed, dt)
+    _, opt_zoh = zoh_trace(opt, dt)
 
-    all_vals = np.concatenate([seed_y.real, seed_y.imag, opt_y.real, opt_y.imag])
+    all_vals = np.concatenate([
+        seed_y.real, seed_y.imag, opt_y.real, opt_y.imag,
+        seed.real, seed.imag, opt.real, opt.imag,
+    ])
     y_lim = _resolved_ylim(ylim, all_vals)
 
     fig, axes = plt.subplots(2, 1, figsize=(10, 6), sharex=True)
     panels = (
-        ("I", seed_y.real, opt_y.real),
-        ("Q", seed_y.imag, opt_y.imag),
+        ("I", seed_zoh.real, opt_zoh.real, seed_y.real, opt_y.real),
+        ("Q", seed_zoh.imag, opt_zoh.imag, seed_y.imag, opt_y.imag),
     )
-    for ax, (label, seed_part, opt_part) in zip(axes, panels):
-        ax.plot(t, seed_part, color="0.65", lw=1.2, ls="--", label=f"seed {label} (MHz)")
+    for ax, (label, seed_hold, opt_hold, seed_part, opt_part) in zip(axes, panels):
+        ax.step(
+            t_zoh, seed_hold, where="post", color="0.55", lw=0.8,
+            label=f"seed {label} ZOH",
+        )
+        ax.step(
+            t_zoh, opt_hold, where="post", color="tab:green", lw=0.8, alpha=0.45,
+            label=f"opt {label} ZOH",
+        )
+        ax.plot(t, seed_part, color="0.35", lw=1.2, ls="--", label=f"seed {label} (MHz)")
         ax.plot(t, opt_part, color="tab:green", lw=1.6, label=f"opt {label} (MHz)")
         ax.axvspan(rs * dt, fs * dt, color="tab:blue", alpha=0.08)
         ax.axvspan(fs * dt, fe * dt, color="tab:orange", alpha=0.08)
