@@ -67,7 +67,9 @@ from HM.simulator.two_qubit_simulator.optimization.cr_grape import (
     echoed_gate_duration_ns,
     quantize_amp_knobs,
     quantize_amp_x,
+    quantize_amp_x_minstep,
     quantize_amp_x_ste_jax,
+    quantize_amp_x_ste_minstep_jax,
 )
 from HM.simulator.two_qubit_simulator.optimization.fidelity import (
     average_gate_fidelity,
@@ -725,6 +727,8 @@ class RobustCRGrapeOptimizer:
             self.flat_knobs_seed = quantize_amp_knobs(
                 self.flat_knobs_seed, self._amp_step_mhz
             )
+        self._x_accepted = _knobs_to_x(self.flat_knobs_seed).astype(float).copy()
+        self._q_sim = self._x_accepted.copy()
         self.cr_half_seed, self.half_slices = assemble_cr_half_from_flat_knobs(
             self.flat_knobs_seed,
             flat_len_ns=config.flat_len_ns,
@@ -760,9 +764,11 @@ class RobustCRGrapeOptimizer:
             weights = self.weights
             lam = float(config.spread_penalty_lambda)
             amp_step = self._amp_step_mhz
+            amp_bound = float(config.amp_bound_mhz)
 
-            def _cost_only(x):
-                xq = quantize_amp_x_ste_jax(x, amp_step)
+            def _cost_only(x, x_accepted, q_sim):
+                xq = quantize_amp_x_ste_minstep_jax(x, x_accepted, q_sim, amp_step)
+                xq = jnp.clip(xq, -amp_bound, amp_bound)
                 return grape_cost_robust(
                     xq,
                     sim,
@@ -772,7 +778,20 @@ class RobustCRGrapeOptimizer:
                     spread_penalty_lambda=lam,
                 )
 
-            self._cost_vg = jax.jit(jax.value_and_grad(_cost_only))
+            # argnums=0: x_accepted and q_sim are inputs, so a new pulse does not retrace.
+            self._cost_vg = jax.jit(jax.value_and_grad(_cost_only, argnums=0))
+            if amp_step is None:
+                def _cost_only_cont(x):
+                    return grape_cost_robust(
+                        x,
+                        sim,
+                        statics,
+                        fidelity_metric=metric,
+                        weights=weights,
+                        spread_penalty_lambda=lam,
+                    )
+
+                self._cost_vg = jax.jit(jax.value_and_grad(_cost_only_cont))
 
         self.history: list[dict] = []
         self.eval_history: list[dict] = []
@@ -948,7 +967,14 @@ class RobustCRGrapeOptimizer:
         """JAX AD path for SciPy (jac=True)."""
         t0 = time.perf_counter()
         x_j = jnp.asarray(x, dtype=jnp.float64)
-        c, g = self._cost_vg(x_j)
+        if self._amp_step_mhz is None:
+            c, g = self._cost_vg(x_j)
+        else:
+            c, g = self._cost_vg(
+                x_j,
+                jnp.asarray(self._x_accepted, dtype=jnp.float64),
+                jnp.asarray(self._q_sim, dtype=jnp.float64),
+            )
         c_f = float(c)
         g_np = np.asarray(g, dtype=float)
         elapsed = time.perf_counter() - t0
@@ -989,9 +1015,44 @@ class RobustCRGrapeOptimizer:
             print(f"  eval {metrics['eval']:4d}  cost={c_f:.5f}  ({elapsed:.1f}s)")
         return c_f, g_np
 
+    def _checkpoint_knobs(self, knobs: np.ndarray) -> None:
+        """Write the accepted pulse before the metrics solve.
+
+        ``checkpoint_latest.npz`` is replaced every iteration. Iteration 250,
+        counted the same way as the progress bar, is also kept under its own name.
+        """
+        directory = self.config.results_dir or _default_results_dir()
+        os.makedirs(directory, exist_ok=True)
+        step = int(self._iteration) + 1
+        payload = dict(
+            flat_knobs_opt=np.asarray(knobs, dtype=complex),
+            iteration=np.int32(step),
+        )
+        latest = os.path.join(directory, "checkpoint_latest.npz")
+        tmp = os.path.join(directory, f".checkpoint_latest.{os.getpid()}.tmp.npz")
+        np.savez(tmp, **payload)
+        os.replace(tmp, latest)
+        if step == 250 or step % 25 == 0:
+            named = os.path.join(directory, f"checkpoint_iter_{step:04d}.npz")
+            np.savez(named, **payload)
+            print(f"  checkpoint iter {step} -> {named}", flush=True)
+
+    def _simulated_x(self, x: np.ndarray) -> np.ndarray:
+        """Grid vector actually simulated for SciPy's continuous proposal ``x``."""
+        x = np.asarray(x, dtype=float).reshape(-1)
+        if self._amp_step_mhz is None:
+            return x
+        q = quantize_amp_x_minstep(x, self._x_accepted, self._q_sim, self._amp_step_mhz)
+        return np.clip(q, -float(self.config.amp_bound_mhz), float(self.config.amp_bound_mhz))
+
     def _callback(self, x: np.ndarray) -> None:
+        q = self._simulated_x(x)
+        if self._amp_step_mhz is not None:
+            self._q_sim = q.copy()
+            self._x_accepted = np.asarray(x, dtype=float).reshape(-1).copy()
+        knobs = _x_to_knobs(q)
+        self._checkpoint_knobs(knobs)
         if self.config.use_jax_grad:
-            knobs = quantize_amp_knobs(_x_to_knobs(x), self._amp_step_mhz)
             _, metrics = self.cost_from_knobs(knobs)
             metrics["eval"] = len(self.eval_history)
             self._last_eval_metrics = metrics
@@ -1100,7 +1161,8 @@ class RobustCRGrapeOptimizer:
         if self._amp_step_mhz is not None:
             print(
                 f"  Amp grid: step={self.config.amp_step_khz:g} kHz "
-                f"({self._amp_step_mhz:g} MHz) on I/Q knobs"
+                f"({self._amp_step_mhz:g} MHz) on I/Q knobs. "
+                "A smaller L-BFGS move snaps one grid step in that direction."
             )
         seed_metrics = self.evaluate_seed()
         print("Seed metrics:")

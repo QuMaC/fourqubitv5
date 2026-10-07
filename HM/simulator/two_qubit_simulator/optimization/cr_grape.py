@@ -112,6 +112,47 @@ def quantize_amp_x_ste_jax(x, step_mhz: float | None):
     return x + jax.lax.stop_gradient(x_q - x)
 
 
+def quantize_amp_x_minstep(
+    x: np.ndarray,
+    x_accepted: np.ndarray,
+    q_sim: np.ndarray,
+    step_mhz: float | None,
+) -> np.ndarray:
+    """Grid quantizer that moves one step when L-BFGS's update is smaller than the grid.
+
+    ``x_accepted`` is the last continuous vector SciPy accepted. ``q_sim`` is the
+    grid vector that was actually simulated there. A component whose change is
+    smaller than ``step_mhz`` but not zero steps to the neighboring grid point
+    in that direction, instead of rounding back onto ``q_sim``.
+    """
+    x = np.asarray(x, dtype=float).reshape(-1)
+    if step_mhz is None:
+        return x
+    x_accepted = np.asarray(x_accepted, dtype=float).reshape(-1)
+    q_sim = np.asarray(q_sim, dtype=float).reshape(-1)
+    step = float(step_mhz)
+    delta = x - x_accepted
+    nearest = np.round(x / step) * step
+    stepped = q_sim + np.sign(delta) * step
+    sub = (delta != 0.0) & (np.abs(delta) < step)
+    out = np.where(sub, stepped, nearest)
+    return np.where(delta == 0.0, q_sim, out)
+
+
+def quantize_amp_x_ste_minstep_jax(x, x_accepted, q_sim, step_mhz: float | None):
+    """JAX straight-through version of ``quantize_amp_x_minstep``."""
+    if step_mhz is None:
+        return x
+    step = jnp.asarray(step_mhz, dtype=x.dtype)
+    delta = x - x_accepted
+    nearest = jnp.round(x / step) * step
+    stepped = q_sim + jnp.sign(delta) * step
+    sub = (delta != 0) & (jnp.abs(delta) < step)
+    x_q = jnp.where(sub, stepped, nearest)
+    x_q = jnp.where(delta == 0, q_sim, x_q)
+    return x + jax.lax.stop_gradient(x_q - x)
+
+
 LBFGS_OPTIMIZER = "lbfgs"
 FIRST_ORDER_OPTIMIZERS = ("adam", "adan")
 KNOWN_OPTIMIZERS = (LBFGS_OPTIMIZER,) + FIRST_ORDER_OPTIMIZERS

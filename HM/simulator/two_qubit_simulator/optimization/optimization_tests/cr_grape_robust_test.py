@@ -31,7 +31,7 @@ os.makedirs(RESULTS_DIR, exist_ok=True)
 CR_PULSE_PARAMS = {"amp_mhz": 21, "t_rise_ns": 16, "phase_rad": 0.0}
 FLAT_LEN_NS = 122.0
 N_FLAT_KNOBS = 61  # 46
-N_LINK_SAMPLES = 8
+N_LINK_SAMPLES = 1
 
 # Warm-start from a prior robust result NPZ (loads flat_knobs_opt).
 # USE_SEED_NPZ is the on/off switch; SEED_NPZ can stay set even when unused.
@@ -59,11 +59,13 @@ SPREAD_PENALTY_LAMBDA = 0.3
 
 TARGET_GATE = "zx_m90"  # inferred from seed; or "zx_90" / "zx_m90"
 AMP_BOUND_MHZ = 100
-AMP_STEP_KHZ = 0.55  # I/Q amp grid; None = continuous (MHz units)
+AMP_STEP_KHZ = None  # I/Q amp grid; None = continuous (MHz units)
 MAXITER = 300
 OPTIMIZE = True  # set True for a real L-BFGS / Adam / Adan run
-filter = "lp_350mhz"
+# filter = "lp_350mhz"
 # filter = "identity"
+# filter = "bessel4_350mhz"
+filter = "butterworth4_350mhz"
 
 # "lbfgs" (default), "adam", or "adan"; adam/adan require USE_JAX_GRAD=True.
 OPTIMIZER = "lbfgs"

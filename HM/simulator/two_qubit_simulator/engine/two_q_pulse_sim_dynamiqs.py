@@ -53,7 +53,39 @@ def _configure_jax() -> None:
     dq.set_precision("double")
     dq.set_progress_meter(False)
 
+
+def _warn_linux_map_limit() -> None:
+    """Tell Linux users about the mapping cap before a long JAX run dies in LLVM.
+
+    Windows has no vm.max_map_count. A cap that has already been raised stays quiet.
+    """
+    try:
+        with open("/proc/self/maps", encoding="utf-8") as f:
+            current = sum(1 for _ in f)
+        with open("/proc/sys/vm/max_map_count", encoding="utf-8") as f:
+            limit = int(f.read().strip())
+    except OSError:
+        return
+    if limit >= 262144:
+        return
+    print(
+        "\nERROR: Linux vm.max_map_count is "
+        f"{limit} and this process already has {current} memory mappings.\n"
+        "Any long dynamiqs/JAX run creates a separate mapping for each small "
+        "compiled fragment (about two mappings per 8-16 KB of machine code). "
+        "The count climbs with iterations. At the cap, the kernel refuses the "
+        "next mapping even when plenty of RAM is free. LLVM then reports "
+        "'Cannot allocate memory' and the process segfaults.\n"
+        "Raise the cap before starting Python, for example:\n"
+        "  sudo sysctl -w vm.max_map_count=1048576\n"
+        "To keep it across reboots, write vm.max_map_count=1048576 to "
+        "/etc/sysctl.d/99-max-map-count.conf\n",
+        flush=True,
+    )
+
+
 _configure_jax()
+_warn_linux_map_limit()
 
 class _DynamiqsState:
     """Thin wrapper so experiment code can call ``state.full()`` like QuTiP."""
