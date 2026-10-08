@@ -26,18 +26,21 @@ from HM.simulator.two_qubit_simulator.optimization.cr_qpt import plot_qpt, run_q
 NPZ_PATH = os.path.join(
     os.path.dirname(__file__),
     "results",
-    "robust_lp350mhz",
-    "cr_grape_robust_zz0p15MHz_mms_l0p3_20261003_191251.npz",
+    "robust_dynamiqs_True",
+    "cr_grape_robust_zz0p3MHz_mms_l0p3_20261005_031550.npz",
 )
-
-# Include the unoptimized half stored in the npz.
+# Flat-top only. The optimized half is a separate question.
 WITH_SEED = True
+WITH_OPT = False
 
-# None -> shifts_mhz from the npz. [0.0] -> no spectator detuning.
-SHIFTS_MHZ = None
+# Target-frame detuning in MHz. 0 is the calibrated frame.
+SHIFTS_MHZ = [0.0, -0.05, 0.05, -0.1, 0.1, -0.15, 0.15, -0.2, 0.2, -0.3, 0.3]
 
-# unitary | unitary_diff | chi | chi_diff | all
-WHICH = "chi"
+# unitary (4x4) and chi (16x16), plus each minus the ideal ZX.
+WHICH = "all"
+
+# One vertical scale for the whole detuning series, set by the tallest bar.
+SHARE_Z_ACROSS_SHIFTS = True
 
 # Color reaches full dark at this |z|. None saturates at the largest bar that
 # is at least 4x below the peak, so the ZX peaks stay dark and the error bars
@@ -50,7 +53,7 @@ ENGINE = "dynamiqs"
 TARGET_GATE = None
 
 REPLOT_ONLY = False
-OUT_DIR = None  # None -> next to the pulse npz
+OUT_DIR = os.path.join(os.path.dirname(NPZ_PATH), "flat_detune_city")
 
 
 def _qpt_path(pulse_npz: str, out_dir: str | None) -> str:
@@ -68,11 +71,13 @@ def main() -> None:
             out_dir=OUT_DIR,
             color_cutoff=COLOR_CUTOFF,
             color_gamma=COLOR_GAMMA,
+            share_z_across_shifts=SHARE_Z_ACROSS_SHIFTS,
         )
         return
     run_qpt(
         NPZ_PATH,
         with_seed=WITH_SEED,
+        with_opt=WITH_OPT,
         shifts_mhz=SHIFTS_MHZ,
         which=WHICH,
         engine=ENGINE,
@@ -81,6 +86,7 @@ def main() -> None:
         plot=True,
         color_cutoff=COLOR_CUTOFF,
         color_gamma=COLOR_GAMMA,
+        share_z_across_shifts=SHARE_Z_ACROSS_SHIFTS,
     )
 
 

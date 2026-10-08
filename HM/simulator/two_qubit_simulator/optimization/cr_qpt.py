@@ -204,6 +204,7 @@ def plot_qpt(
     *,
     color_cutoff: float | None = None,
     color_gamma: float = 0.5,
+    share_z_across_shifts: bool = False,
 ) -> list[str]:
     """Draw city plots from a saved ``*_qpt.npz`` without re-evolving the pulse."""
     which = _resolve_which(which)
@@ -217,18 +218,22 @@ def plot_qpt(
     keys = list(WHICH_CHOICES[:-1]) if which == "all" else [which]
     paths: list[str] = []
     for key in keys:
-        groups: dict[float, list[dict]] = {}
-        for case in record["cases"]:
-            groups.setdefault(float(case["shift_mhz"]), []).append(case)
-        for shift, group in groups.items():
+        groups: dict[float | None, list[dict]] = {}
+        if share_z_across_shifts:
+            groups[None] = list(record["cases"])
+        else:
+            for case in record["cases"]:
+                groups.setdefault(float(case["shift_mhz"]), []).append(case)
+        for group in groups.values():
             matrices = [_select_matrix(key, case, record)[0] for case in group]
-            # One vertical scale for every pulse at this shift (flat-top and
-            # optimized). The wider of the two sets the limits.
+            # Flat-top and optimized at one shift share a scale. A detuning
+            # sweep can instead share one scale across every shift, so the
+            # taller spectrum sets the axis for the whole series.
             zlim = _city_zlim(matrices)
             for case in group:
                 matrix, labels, symbol = _select_matrix(key, case, record)
                 title = f"{case['title']}    {key}"
-                tag = _fmt_mhz(shift)
+                tag = _fmt_mhz(case["shift_mhz"])
                 out_png = directory / f"{stem}_qpt_{key}_{case['pulse']}_{tag}.png"
                 plot_city(
                     matrix,
@@ -250,6 +255,7 @@ def run_qpt(
     npz_path: str,
     *,
     with_seed: bool = True,
+    with_opt: bool = True,
     shifts_mhz: list[float] | None = None,
     which: str = "chi",
     engine: str = "dynamiqs",
@@ -262,6 +268,7 @@ def run_qpt(
     plot: bool = True,
     color_cutoff: float | None = None,
     color_gamma: float = 0.5,
+    share_z_across_shifts: bool = False,
 ) -> dict:
     """Evolve the echoed CR pulse and save unitary, chi, and (optionally) city plots.
 
@@ -270,7 +277,9 @@ def run_qpt(
     npz_path
         GRAPE result. The optimized half is ``cr_half_opt_I/Q``.
     with_seed
-        Also propagate ``cr_half_seed_I/Q`` from that same file (the flat-top).
+        Propagate ``cr_half_seed_I/Q`` from that same file (the flat-top).
+    with_opt
+        Propagate the optimized half. Set False to sweep the flat-top only.
     shifts_mhz
         Target-frame shifts in MHz, the same list robust GRAPE stores.
         ``None`` uses ``shifts_mhz`` from the npz. Pass ``[0.0]`` for the
@@ -302,7 +311,10 @@ def run_qpt(
     pulses: list[tuple[str, np.ndarray]] = []
     if with_seed:
         pulses.append(("flat", loaded["seed"]))
-    pulses.append(("opt", loaded["opt"]))
+    if with_opt:
+        pulses.append(("opt", loaded["opt"]))
+    if not pulses:
+        raise ValueError("nothing to propagate: with_seed and with_opt are both False")
 
     exp, lab_frame = _make_experiment(settings)
     x_pi = exp.build_x_pi()
@@ -380,6 +392,7 @@ def run_qpt(
             out_dir=str(out_directory),
             color_cutoff=color_cutoff,
             color_gamma=color_gamma,
+            share_z_across_shifts=share_z_across_shifts,
         )
     return {
         "qpt_npz": str(qpt_path),
