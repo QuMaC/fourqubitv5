@@ -6,13 +6,12 @@ The code builds the chi matrix with Qiskit's normalization. Qiskit itself is not
 
 ## What one figure is
 
-Each png is one pulse at one target-frame shift.
+Each GIF is one pulse and one matrix. Frames run from the most negative target-frame shift to the most positive, and a bar under the title fills as the detuning increases.
 
 | Filename piece | Meaning |
 |---|---|
 | `flat` | `cr_half_seed_I/Q` from the GRAPE npz, the flat-top |
 | `opt` | `cr_half_opt_I/Q`, the optimized pulse |
-| `m0p075`, `0p075` | target-frame shift in MHz (`m` is a minus sign) |
 | `chi` | 16×16 process matrix |
 | `unitary` | 4×4 computational unitary |
 | `*_diff` | that matrix minus the ideal \(ZX\) |
@@ -107,9 +106,10 @@ python -m HM.simulator.two_qubit_simulator.optimization.optimization_tests.cr_qp
 
 Knobs live at the top of `optimization_tests/cr_qpt_city.py`.
 
-- `WHICH`: `chi`, `unitary`, `chi_diff`, `unitary_diff`, or `all`.
-- `WITH_SEED`: also propagate the flat-top stored in the same npz.
-- `SHIFTS_MHZ = None` uses the shifts in the npz. `SHIFTS_MHZ = [0.0]` is the calibrated frame only.
-- `REPLOT_ONLY = True` redraws from the saved `*_qpt.npz`.
+- `WHICH`: `chi`, `unitary`, `chi_diff`, `unitary_diff`, or `all`. Each one is a GIF per pulse.
+- `WITH_SEED` / `WITH_OPT`: which halves to propagate.
+- `SHIFTS_MHZ` is the target-frame grid in MHz. `None` uses the shifts in the npz.
+- `GIF_FRAME_MS` is how long each detuning stays on screen.
+- `REPLOT_ONLY = True` redraws the GIFs from the saved `*_qpt.npz`.
 
 `*_qpt.npz` holds every matrix. `*_qpt.json` holds the fidelities, leakage, and the global phase that was removed.

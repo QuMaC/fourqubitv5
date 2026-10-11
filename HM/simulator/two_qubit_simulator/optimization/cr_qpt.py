@@ -14,7 +14,9 @@ Local Z rotations are left in the lab frame. A spectator-dependent phase therefo
 stays visible. The global phase of each propagator is chosen so that
 ``Tr(U_target^dag U)`` is real and positive.
 
-``which`` selects the picture, at run time or later from the saved ``*_qpt.npz``:
+``which`` selects the picture, at run time or later from the saved ``*_qpt.npz``.
+Each choice is one GIF. Frames are that pulse at each target-frame shift,
+ordered so the detuning increases:
 
 - ``unitary``       4x4 computational unitary
 - ``unitary_diff``  that unitary minus the ideal ZX
@@ -33,6 +35,7 @@ import os
 from pathlib import Path
 
 import matplotlib
+from PIL import Image
 
 matplotlib.use("Agg")
 import matplotlib.colors as mcolors
@@ -97,13 +100,15 @@ def plot_city(
     matrix: np.ndarray,
     labels: list[str] | tuple[str, ...],
     title: str,
-    out_png: str,
+    out_png: str | None,
     symbol: str,
     fidelity: float | None = None,
     color_cutoff: float | None = None,
     color_gamma: float = 0.5,
     zlim: tuple[float, float] | None = None,
-) -> str:
+    detune_mhz: float | None = None,
+    detune_limits: tuple[float, float] | None = None,
+) -> str | plt.Figure:
     """Real/imaginary 3d bar plot in the style of Qiskit's ``plot_state_city``.
 
     The vertical axis is the real or imaginary part of one matrix entry.
@@ -120,6 +125,11 @@ def plot_city(
 
     ``zlim`` replaces the per-figure vertical range. A flat-top / optimized pair
     passes the same limits, taken from whichever matrix extends further.
+
+    ``detune_mhz`` draws a bar for where this frame sits in ``detune_limits``.
+    The bar fills from the low end toward the high end, so a GIF ordered by
+    increasing shift shows the detuning advancing. ``out_png=None`` returns
+    the open figure instead of writing a file.
     """
     data = np.asarray(matrix, dtype=complex)
     if data.ndim != 2 or data.shape[0] != data.shape[1]:
@@ -132,7 +142,7 @@ def plot_city(
     imag = np.imag(data)
     fig_in = 8.0 if n <= 4 else 13.0
     font = 12 if n <= 4 else 8
-    fig = plt.figure(figsize=(2.05 * fig_in, fig_in), facecolor="w")
+    fig = plt.figure(figsize=(2.05 * fig_in, fig_in), facecolor="w", dpi=140)
     ax_real = fig.add_subplot(1, 2, 1, projection="3d")
     ax_imag = fig.add_subplot(1, 2, 2, projection="3d")
 
@@ -180,7 +190,8 @@ def plot_city(
         ax.tick_params(axis="y", pad=0)
 
     heading = title if fidelity is None else f"{title}     F_proc = {fidelity:.6f}"
-    fig.suptitle(heading, fontsize=32 if n <= 4 else 36)
+    show_detune = detune_mhz is not None
+    fig.suptitle(heading, fontsize=32 if n <= 4 else 36, y=0.97 if show_detune else 0.98)
     fig.text(
         0.5,
         0.01,
@@ -190,11 +201,84 @@ def plot_city(
         fontsize=16 if n <= 4 else 20,
         color="0.25",
     )
-    fig.subplots_adjust(left=0.0, right=1.0, bottom=0.06, top=0.80, wspace=0.0)
+    # The detuning bar sits in the band under the title. The lower top margin
+    # keeps the 3D panel headings from running into it.
+    fig.subplots_adjust(
+        left=0.0, right=1.0, bottom=0.06, top=0.68 if show_detune else 0.80, wspace=0.0
+    )
+    if show_detune:
+        if detune_limits is None:
+            limits = (float(detune_mhz), float(detune_mhz))
+        else:
+            limits = detune_limits
+        _add_detune_indicator(fig, float(detune_mhz), limits)
+    if out_png is None:
+        return fig
     os.makedirs(os.path.dirname(os.path.abspath(out_png)) or ".", exist_ok=True)
     fig.savefig(out_png, dpi=140, bbox_inches="tight")
     plt.close(fig)
     return out_png
+
+
+def _add_detune_indicator(
+    fig: plt.Figure, shift_mhz: float, limits: tuple[float, float]
+) -> None:
+    """Bar that fills from the low shift toward the high shift.
+
+    A frame sequence sorted by shift then shows the detuning increasing.
+    """
+    lo, hi = float(limits[0]), float(limits[1])
+    moving = hi - lo > 1e-9
+    left, right = (lo, hi) if moving else (shift_mhz - 0.5, shift_mhz + 0.5)
+    ax = fig.add_axes([0.18, 0.78, 0.64, 0.035])
+    ax.set_xlim(left, right)
+    ax.set_ylim(0, 1)
+    ax.set_facecolor("#e4e4e4")
+    if moving and shift_mhz > lo + 1e-9:
+        ax.axvspan(lo, shift_mhz, facecolor="#1f4e79", edgecolor="none", zorder=2)
+    ax.axvline(shift_mhz, color="#b22222", linewidth=3.0, zorder=3)
+    ax.set_xticks([])
+    ax.set_yticks([])
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+    note = f"target detuning  {shift_mhz:+.3f} MHz"
+    if moving:
+        note += f"     increases ->     ({lo:+.3f} to {hi:+.3f} MHz)"
+    fig.text(0.5, 0.825, note, ha="center", va="bottom", fontsize=22, color="0.1")
+
+
+def _figure_rgb(fig: plt.Figure) -> np.ndarray:
+    fig.canvas.draw()
+    rgba = np.asarray(fig.canvas.buffer_rgba())
+    return np.ascontiguousarray(rgba[:, :, :3])
+
+
+def _write_gif(path: Path, frames: list[np.ndarray], frame_ms: int) -> None:
+    """One palette for the whole GIF, so the bars do not flicker between frames."""
+    if frame_ms <= 0:
+        raise ValueError(f"frame_ms must be positive, got {frame_ms}")
+    if not frames:
+        raise ValueError("no frames to write")
+    images = [Image.fromarray(frame) for frame in frames]
+    width = max(image.width for image in images)
+    height = max(image.height for image in images)
+    canvases: list[Image.Image] = []
+    for image in images:
+        if image.size != (width, height):
+            canvas = Image.new("RGB", (width, height), "white")
+            canvas.paste(image, (0, 0))
+            image = canvas
+        canvases.append(image)
+    palette = canvases[0].quantize(colors=256, method=Image.Quantize.MEDIANCUT)
+    quantized = [image.quantize(palette=palette, dither=Image.Dither.NONE) for image in canvases]
+    quantized[0].save(
+        path,
+        save_all=True,
+        append_images=quantized[1:],
+        duration=int(frame_ms),
+        loop=0,
+        optimize=False,
+    )
 
 
 def plot_qpt(
@@ -205,8 +289,13 @@ def plot_qpt(
     color_cutoff: float | None = None,
     color_gamma: float = 0.5,
     share_z_across_shifts: bool = False,
+    frame_ms: int = 500,
 ) -> list[str]:
-    """Draw city plots from a saved ``*_qpt.npz`` without re-evolving the pulse."""
+    """Draw one GIF per matrix kind and pulse from a saved ``*_qpt.npz``.
+
+    Frames run from the most negative target-frame shift to the most positive.
+    The matrices themselves stay in the npz; this only redraws.
+    """
     which = _resolve_which(which)
     record = _load_qpt_npz(qpt_npz)
     directory = Path(out_dir) if out_dir else Path(qpt_npz).parent
@@ -216,44 +305,103 @@ def plot_qpt(
         stem = stem[: -len("_qpt")]
 
     keys = list(WHICH_CHOICES[:-1]) if which == "all" else [which]
+    pulses: list[str] = []
+    for case in record["cases"]:
+        if case["pulse"] not in pulses:
+            pulses.append(case["pulse"])
+
     paths: list[str] = []
     for key in keys:
-        groups: dict[float | None, list[dict]] = {}
+        # Flat-top and optimized at one shift share a scale. A detuning sweep
+        # can instead share one scale across every shift, so the taller
+        # spectrum sets the axis for the whole series.
+        zlim_for: dict[float, tuple[float, float]] = {}
         if share_z_across_shifts:
-            groups[None] = list(record["cases"])
+            matrices = [_select_matrix(key, case, record)[0] for case in record["cases"]]
+            shared = _city_zlim(matrices)
         else:
+            grouped: dict[float, list[np.ndarray]] = {}
             for case in record["cases"]:
-                groups.setdefault(float(case["shift_mhz"]), []).append(case)
-        for group in groups.values():
-            matrices = [_select_matrix(key, case, record)[0] for case in group]
-            # Flat-top and optimized at one shift share a scale. A detuning
-            # sweep can instead share one scale across every shift, so the
-            # taller spectrum sets the axis for the whole series.
-            zlim = _city_zlim(matrices)
-            for case in group:
+                grouped.setdefault(float(case["shift_mhz"]), []).append(
+                    _select_matrix(key, case, record)[0]
+                )
+            zlim_for = {shift: _city_zlim(group) for shift, group in grouped.items()}
+            shared = None
+        for pulse in pulses:
+            series = [case for case in record["cases"] if case["pulse"] == pulse]
+            series.sort(key=lambda case: float(case["shift_mhz"]))
+            shifts = [float(case["shift_mhz"]) for case in series]
+            limits = (min(shifts), max(shifts))
+            frames: list[np.ndarray] = []
+            for case in series:
                 matrix, labels, symbol = _select_matrix(key, case, record)
-                title = f"{case['title']}    {key}"
-                tag = _fmt_mhz(case["shift_mhz"])
-                out_png = directory / f"{stem}_qpt_{key}_{case['pulse']}_{tag}.png"
-                plot_city(
+                shift = float(case["shift_mhz"])
+                fig = plot_city(
                     matrix,
                     labels,
-                    title,
-                    str(out_png),
+                    f"{case['title']}    {key}",
+                    None,
                     symbol,
                     fidelity=case.get("process_fidelity"),
                     color_cutoff=color_cutoff,
                     color_gamma=color_gamma,
-                    zlim=zlim,
+                    zlim=shared if shared is not None else zlim_for[shift],
+                    detune_mhz=shift,
+                    detune_limits=limits,
                 )
-                paths.append(str(out_png))
-                print(f"Saved {out_png}")
+                frames.append(_figure_rgb(fig))
+                plt.close(fig)
+            out_gif = directory / f"{stem}_qpt_{key}_{pulse}.gif"
+            _write_gif(out_gif, frames, frame_ms)
+            paths.append(str(out_gif))
+            print(f"Saved {out_gif}")
     return paths
 
 
-def run_qpt(
-    npz_path: str,
+def calibrated_flat_half(
     *,
+    amp_mhz: float = 21.0,
+    phase_rad: float = 0.0,
+    t_rise_ns: int = 16,
+    flat_len_ns: float = 122.0,
+    n_flat_knobs: int = 61,
+    n_link_samples: int = 1,
+    dt_ns: float = 1.0,
+) -> np.ndarray:
+    """CR half of the calibrated flat-top used as the robust-GRAPE seed.
+
+    Same construction as ``RobustCRGrapeOptimizer`` when no warm-start npz is
+    passed: subsample ``cr_rise_fall_flat_top``, then stitch the lab rise and
+    fall onto those flat knobs.
+    """
+    from HM.simulator.two_qubit_simulator.engine.pulses import (
+        assemble_cr_half_from_flat_knobs,
+        seed_flat_knobs_from_calibrated_cr,
+    )
+
+    knobs = seed_flat_knobs_from_calibrated_cr(
+        n_flat_knobs=n_flat_knobs,
+        flat_len_ns=flat_len_ns,
+        amp_mhz=amp_mhz,
+        phase_rad=phase_rad,
+        t_rise_ns=t_rise_ns,
+        dt_ns=dt_ns,
+    )
+    half, _slices = assemble_cr_half_from_flat_knobs(
+        knobs,
+        flat_len_ns=flat_len_ns,
+        t_rise_ns=t_rise_ns,
+        dt_ns=dt_ns,
+        n_link_samples=n_link_samples,
+    )
+    return np.asarray(half, dtype=complex).reshape(-1)
+
+
+def run_qpt(
+    npz_path: str | None = None,
+    *,
+    flat_half: np.ndarray | None = None,
+    stem: str | None = None,
     with_seed: bool = True,
     with_opt: bool = True,
     shifts_mhz: list[float] | None = None,
@@ -264,18 +412,25 @@ def run_qpt(
     n_sub: int | None = None,
     qubit_pair: list[int] | None = None,
     envelope: str | None = None,
+    seed_amp_mhz: float | None = None,
+    seed_phase_rad: float | None = None,
+    t_rise_ns: int | None = None,
     out_dir: str | None = None,
     plot: bool = True,
     color_cutoff: float | None = None,
     color_gamma: float = 0.5,
     share_z_across_shifts: bool = False,
+    frame_ms: int = 500,
 ) -> dict:
-    """Evolve the echoed CR pulse and save unitary, chi, and (optionally) city plots.
+    """Evolve the echoed CR pulse and save unitary, chi, and (optionally) city GIFs.
 
     Parameters
     ----------
     npz_path
         GRAPE result. The optimized half is ``cr_half_opt_I/Q``.
+        Omit this when ``flat_half`` is the calibrated flat-top.
+    flat_half
+        One CR half, in MHz. Used as the flat-top, with no optimized pulse.
     with_seed
         Propagate ``cr_half_seed_I/Q`` from that same file (the flat-top).
     with_opt
@@ -286,14 +441,30 @@ def run_qpt(
         calibrated frame only (before and after, no spectator detuning).
     which
         One of ``unitary``, ``unitary_diff``, ``chi``, ``chi_diff``, ``all``.
+        Each choice is written as one GIF per pulse. ``frame_ms`` is how long
+        each detuning stays on screen. The ``*_qpt.npz`` is written either way.
     """
     which = _resolve_which(which)
-    loaded = load_grape_npz(npz_path)
-    if with_seed and loaded["seed"] is None:
-        raise KeyError(
-            f"{npz_path} has no cr_half_seed_I/Q; set with_seed=False or pass a "
-            "GRAPE npz that stored the flat-top."
-        )
+    if flat_half is not None:
+        if with_opt:
+            raise ValueError("flat_half has no optimized pulse; set with_opt=False")
+        label = stem or "calibrated_flat_top"
+        loaded = {
+            "path": label,
+            "opt": None,
+            "seed": np.asarray(flat_half, dtype=complex).reshape(-1),
+            "shifts_mhz": None,
+            "meta": None,
+        }
+    else:
+        if npz_path is None:
+            raise ValueError("pass npz_path or flat_half")
+        loaded = load_grape_npz(npz_path)
+        if with_seed and loaded["seed"] is None:
+            raise KeyError(
+                f"{npz_path} has no cr_half_seed_I/Q; set with_seed=False or pass a "
+                "GRAPE npz that stored the flat-top."
+            )
 
     meta = loaded["meta"]
     cfg = (meta or {}).get("config") or {}
@@ -303,9 +474,13 @@ def run_qpt(
         "n_sub": int(n_sub if n_sub is not None else cfg.get("n_sub", 16)),
         "qubit_pair": list(qubit_pair if qubit_pair is not None else cfg.get("qubit_pair", [1, 2])),
         "envelope": envelope if envelope is not None else str(cfg.get("envelope", "identity")),
-        "seed_amp_mhz": float(cfg.get("seed_amp_mhz", 21.0)),
-        "seed_phase_rad": float(cfg.get("seed_phase_rad", 0.0)),
-        "t_rise_ns": int(cfg.get("t_rise_ns", 16)),
+        "seed_amp_mhz": float(
+            seed_amp_mhz if seed_amp_mhz is not None else cfg.get("seed_amp_mhz", 21.0)
+        ),
+        "seed_phase_rad": float(
+            seed_phase_rad if seed_phase_rad is not None else cfg.get("seed_phase_rad", 0.0)
+        ),
+        "t_rise_ns": int(t_rise_ns if t_rise_ns is not None else cfg.get("t_rise_ns", 16)),
     }
     shifts = _resolve_shifts(shifts_mhz, loaded["shifts_mhz"])
     pulses: list[tuple[str, np.ndarray]] = []
@@ -376,28 +551,29 @@ def run_qpt(
 
     out_directory = Path(out_dir) if out_dir else Path(loaded["path"]).parent
     out_directory.mkdir(parents=True, exist_ok=True)
-    stem = Path(loaded["path"]).stem
-    qpt_path = out_directory / f"{stem}_qpt.npz"
-    summary_path = out_directory / f"{stem}_qpt.json"
+    file_stem = stem or Path(loaded["path"]).stem
+    qpt_path = out_directory / f"{file_stem}_qpt.npz"
+    summary_path = out_directory / f"{file_stem}_qpt.json"
     _save_qpt(qpt_path, cases, U_target, chi_target, locked_gate, settings, loaded["path"], shifts)
     _save_summary(summary_path, cases, locked_gate, settings, loaded["path"], shifts)
     print(f"Saved {qpt_path}")
     print(f"Saved {summary_path}")
 
-    pngs: list[str] = []
+    gifs: list[str] = []
     if plot:
-        pngs = plot_qpt(
+        gifs = plot_qpt(
             str(qpt_path),
             which=which,
             out_dir=str(out_directory),
             color_cutoff=color_cutoff,
             color_gamma=color_gamma,
             share_z_across_shifts=share_z_across_shifts,
+            frame_ms=frame_ms,
         )
     return {
         "qpt_npz": str(qpt_path),
         "summary_json": str(summary_path),
-        "pngs": pngs,
+        "gifs": gifs,
         "target_gate": locked_gate,
         "cases": cases,
     }
@@ -630,10 +806,6 @@ def _case_title(pulse: str, shift: float, shifts: list[float]) -> str:
     if len(shifts) == 1 and abs(shifts[0]) < 1e-15:
         return name
     return f"{name}, shift {shift:+.4g} MHz"
-
-
-def _fmt_mhz(x: float) -> str:
-    return f"{float(x):.4g}".replace("-", "m").replace(".", "p").replace("+", "")
 
 
 def _load_sibling_json(npz_path: str) -> dict | None:
