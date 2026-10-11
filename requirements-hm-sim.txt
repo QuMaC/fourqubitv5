@@ -51,6 +51,7 @@ multidict==6.6.4
 networkx==3.5
 numpy==2.4.6
 opt_einsum==3.4.0
+optax==0.2.8
 optimistix==0.1.0
 pillow==11.3.0
 platformdirs==4.4.0

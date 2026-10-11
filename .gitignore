@@ -4,6 +4,10 @@ __pycache__/
 
 # Local path / env overrides
 .env
+.venv-cr-nn/
+.jax_cache/
+*.eqx
+results/cr_nn*/
 
 
 # Data files

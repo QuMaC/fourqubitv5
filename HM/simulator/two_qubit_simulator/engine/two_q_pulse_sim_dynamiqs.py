@@ -224,9 +224,22 @@ class TwoQubitPulseSimulatorDynamiqs:
                 raise ValueError("all channels must be the same length")
         return L
 
-    def _coupling_hamiltonian(self) -> dq.TimeQArray:
-        delta = self.delta_qq_MHz
-        j_scale = TWOPI * self.J_MHz
+    def _target_frame(self, target_frame_MHz=None):
+        """Return the installed target frame or an explicit traced override."""
+        if target_frame_MHz is None:
+            return self.qubits[1].frame_MHz
+        return jnp.asarray(target_frame_MHz, dtype=jnp.float64)
+
+    def _coupling_hamiltonian(
+        self,
+        *,
+        target_frame_MHz=None,
+        J_MHz=None,
+    ) -> dq.TimeQArray:
+        frame1 = self._target_frame(target_frame_MHz)
+        delta = jnp.asarray(self.qubits[0].frame_MHz) - frame1
+        coupling = self.J_MHz if J_MHz is None else J_MHz
+        j_scale = TWOPI * jnp.asarray(coupling, dtype=jnp.float64)
         fwd = dq.modulated(
             lambda t: jnp.exp(1j * TWOPI * delta * t),
             j_scale * self.coupling_op,
@@ -242,9 +255,15 @@ class TwoQubitPulseSimulatorDynamiqs:
         name: str,
         eps_arr: jnp.ndarray,
         discontinuity_ts: jnp.ndarray,
+        *,
+        target_frame_MHz=None,
     ) -> dq.TimeQArray:
         dl = self.drive_lines[name]
-        delta = dl.carrier_MHz - self.qubits[dl.target].frame_MHz
+        if dl.target == 1:
+            frame = self._target_frame(target_frame_MHz)
+        else:
+            frame = self.qubits[dl.target].frame_MHz
+        delta = dl.carrier_MHz - frame
         ad_op, a_op = self._drive_ops[name]
         envelope = resolve_envelope(self.envelope)(eps_arr, self.dt_sample_us)
 
@@ -266,16 +285,30 @@ class TwoQubitPulseSimulatorDynamiqs:
         )
         return ad_term + a_term
 
-    def _build_hamiltonian(self, timeline: dict[str, np.ndarray]) -> dq.TimeQArray:
+    def _build_hamiltonian(
+        self,
+        timeline: dict[str, np.ndarray],
+        *,
+        target_frame_MHz=None,
+        J_MHz=None,
+    ) -> dq.TimeQArray:
         L = self._validate_timeline(timeline)
         discontinuity_ts = jnp.linspace(0.0, L * self.dt_sample_us, L + 1)
 
-        H = self.H_drift + self._coupling_hamiltonian()
+        H = self.H_drift + self._coupling_hamiltonian(
+            target_frame_MHz=target_frame_MHz,
+            J_MHz=J_MHz,
+        )
         for name in self.channel_names:
             eps_arr = jnp.array(timeline[name], dtype=complex)
             # if jnp.all(eps_arr == 0):
             #     continue
-            H = H + self._drive_hamiltonian(name, eps_arr, discontinuity_ts)
+            H = H + self._drive_hamiltonian(
+                name,
+                eps_arr,
+                discontinuity_ts,
+                target_frame_MHz=target_frame_MHz,
+            )
         return H
 
     def _initial_state(self, psi0: Any | None) -> dq.QArray:
@@ -412,17 +445,31 @@ class TwoQubitPulseSimulatorDynamiqs:
         return counts, info
 
 
-    def evolve_comp(self, timeline: dict) -> jnp.ndarray:
+    def evolve_comp(
+        self,
+        timeline: dict,
+        *,
+        target_frame_MHz=None,
+        J_MHz=None,
+    ) -> jnp.ndarray:
         """Evolve computational basis kets ``00,01,10,11`` in one ``sesolve``.
 
         Returns a JAX array (keeps the AD tape; no ``np.asarray``):
 
         - ``(4, dim, 1)`` if ``delta_qq_MHz`` is a lab scalar
         - ``(N, 4, dim, 1)`` if ``delta_qq_MHz`` has shape ``(N,)`` (robust batch)
+
+        ``target_frame_MHz`` and ``J_MHz`` are optional traced overrides used
+        by amortized pulse training. Omitting them preserves the installed
+        state used by the existing GRAPE path.
         """
 
         L = self._validate_timeline(timeline)
-        H = self._build_hamiltonian(timeline)
+        H = self._build_hamiltonian(
+            timeline,
+            target_frame_MHz=target_frame_MHz,
+            J_MHz=J_MHz,
+        )
         psi0 = jnp.zeros((4, self.dim, 1), dtype=jnp.complex128)
 
         for j, idx in enumerate(self.comp_idx):
