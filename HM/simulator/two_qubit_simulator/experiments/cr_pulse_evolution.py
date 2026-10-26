@@ -500,7 +500,8 @@ if __name__ == "__main__":
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
         "optimization", "optimization_tests", "results", "cr_grape_pulse.npz",
     )
-    ARB_NPZ_PATH =f'/home/lab/hm/hm_sim/HM/simulator/two_qubit_simulator/optimization/optimization_tests/results/robust_dynamiqs_True/cr_grape_robust_zz0p15MHz_mms_l0p3_20260829_042038.npz'
+    ARB_NPZ_PATH =f'/home/hm/IITB/TIFR/Software/Hari_6_qubit/fourqubitv5/HM/simulator/two_qubit_simulator/optimization/optimization_tests/results/robust_zz_sweep_dynamiqs/warm/zz_150_kHz/cr_grape_robust_zz0p15MHz_mms_l0p3_20260823_174651.npz'
+    # ARB_NPZ_PATH = False
     if ARB_NPZ_PATH:
         n_levels = 4
         perform_arb_pulse_evolution(
