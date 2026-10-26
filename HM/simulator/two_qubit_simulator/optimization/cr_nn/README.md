@@ -1,5 +1,9 @@
 # Robust echoed-CR neural pulse generator
 
+The physics, the locked choices, how the sweeps become plots, and what to do
+next are in `GUIDE.md`. `GUIDE.pdf` is the same text with the equations
+rendered. This file is the command list.
+
 This package trains one neural network through the differentiable dynamiqs
 simulator. It does not learn from a dataset of GRAPE pulses.
 
