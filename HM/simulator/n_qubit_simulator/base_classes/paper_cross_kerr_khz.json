@@ -1,0 +1,23 @@
+{
+  "source": "J. Deshmukh et al., Phys. Rev. Research 8, 033049 (2026), DOI 10.1103/6jdh-pm39, Fig. 1(c)",
+  "convention": "full state-dependent frequency shift E11 - E10 - E01 + E00, kHz",
+  "nearest_neighbour_khz": {
+    "c1_t2": 239.0,
+    "c1_t4": 116.0,
+    "c1_t6": 64.0,
+    "c3_t2": 225.0,
+    "c3_t4": 268.0,
+    "c3_t6": 147.0,
+    "c5_t2": 154.0,
+    "c5_t4": 162.0,
+    "c5_t6": 100.0
+  },
+  "next_nearest_khz": {
+    "q1_q3": 4.9,
+    "q1_q5": 9.7,
+    "q2_q4": 3.8,
+    "q2_q6": 3.9,
+    "q3_q5": 0.4,
+    "q4_q6": 2.5
+  }
+}
