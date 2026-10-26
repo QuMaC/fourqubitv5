@@ -40,6 +40,7 @@ from PIL import Image
 matplotlib.use("Agg")
 import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
 import numpy as np
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
@@ -141,8 +142,12 @@ def plot_city(
     real = np.real(data)
     imag = np.imag(data)
     fig_in = 8.0 if n <= 4 else 13.0
-    font = 12 if n <= 4 else 8
-    fig = plt.figure(figsize=(2.05 * fig_in, fig_in), facecolor="w", dpi=140)
+    # 4x4 unitaries have room for one row of labels. A 16x16 chi does not:
+    # those labels are drawn on two pads (see _stagger_tick_pads) at a size
+    # that stays readable once the figure is scaled down to a screen.
+    font = 12 if n <= 4 else 20
+    width_scale = 2.05 if n <= 4 else 2.4
+    fig = plt.figure(figsize=(width_scale * fig_in, fig_in), facecolor="w", dpi=140)
     ax_real = fig.add_subplot(1, 2, 1, projection="3d")
     ax_imag = fig.add_subplot(1, 2, 2, projection="3d")
 
@@ -179,15 +184,23 @@ def plot_city(
         ax.set_zlabel(f"{z_part}({symbol})", fontsize=zlabel_size, labelpad=22)
         ax.set_xticks(np.arange(0.5, n + 0.5, 1))
         ax.set_yticks(np.arange(0.5, n + 0.5, 1))
-        x_rot = 45 if n <= 4 else 90
-        y_rot = -22 if n <= 4 else 0
-        ax.set_xticklabels(list(labels), fontsize=font, rotation=x_rot, ha="right", va="top")
-        ax.set_yticklabels(list(labels), fontsize=font, rotation=y_rot, ha="left", va="center")
+        if n > 4:
+            # Size and the two-row stagger are applied in _stagger_city_labels
+            # after the 3D projection. These are only the initial settings.
+            ax.set_xticklabels(list(labels), fontsize=font, rotation=0, ha="center", va="center")
+            ax.set_yticklabels(list(labels), fontsize=font, rotation=0, ha="center", va="center")
+        else:
+            ax.set_xticklabels(list(labels), fontsize=font, rotation=45, ha="right", va="top")
+            ax.set_yticklabels(list(labels), fontsize=font, rotation=-22, ha="left", va="center")
         ax.set_zlim(zmin, zmax)
         ax.set_box_aspect((4, 4, 3))
         ax.tick_params(axis="z", labelsize=max(font + 4, 14), pad=6)
-        ax.tick_params(axis="x", pad=0)
-        ax.tick_params(axis="y", pad=0)
+        if n > 4:
+            ax.tick_params(axis="x", pad=2)
+            ax.tick_params(axis="y", pad=2)
+        else:
+            ax.tick_params(axis="x", pad=0)
+            ax.tick_params(axis="y", pad=0)
 
     heading = title if fidelity is None else f"{title}     F_proc = {fidelity:.6f}"
     show_detune = detune_mhz is not None
@@ -203,21 +216,154 @@ def plot_city(
     )
     # The detuning bar sits in the band under the title. The lower top margin
     # keeps the 3D panel headings from running into it.
-    fig.subplots_adjust(
-        left=0.0, right=1.0, bottom=0.06, top=0.68 if show_detune else 0.80, wspace=0.0
-    )
+    # The outer row of a 16-label axis hangs past the axes spine, and the
+    # right-hand panel's y labels need a gutter so they do not cover the
+    # left city plot. GIF frames use the canvas, so this margin is the room
+    # those labels actually get.
+    if n > 4:
+        margins = dict(left=0.07, right=0.98, bottom=0.16, top=0.68 if show_detune else 0.80, wspace=0.12)
+    else:
+        margins = dict(left=0.0, right=1.0, bottom=0.06, top=0.68 if show_detune else 0.80, wspace=0.0)
+    fig.subplots_adjust(**margins)
     if show_detune:
         if detune_limits is None:
             limits = (float(detune_mhz), float(detune_mhz))
         else:
             limits = detune_limits
         _add_detune_indicator(fig, float(detune_mhz), limits)
+    if n > 4:
+        _stagger_city_labels(fig, font * fig.dpi / 72.0)
     if out_png is None:
         return fig
     os.makedirs(os.path.dirname(os.path.abspath(out_png)) or ".", exist_ok=True)
     fig.savefig(out_png, dpi=140, bbox_inches="tight")
     plt.close(fig)
     return out_png
+
+
+def _stagger_city_labels(fig: plt.Figure, font_px: float) -> None:
+    """Draw every other basis label on a second row, in screen space.
+
+    A 3D tick pad is applied before the projection, so on the foreshortened
+    end of the axis the two rows collapse into each other. This draws once to
+    learn where each label landed, then later draws step the odd labels out
+    along the screen perpendicular by a fixed number of pixels.
+    """
+    gap = 2.2 * float(font_px)
+    groups: list[list] = []
+    for ax in fig.axes:
+        if getattr(ax, "name", "") != "3d":
+            continue
+        for axis in (ax.xaxis, ax.yaxis):
+            labeled = [tick for tick in axis.get_major_ticks() if tick.label1.get_text()]
+            if len(labeled) < 3:
+                continue
+            group: list = []
+            groups.append(group)
+            axis_name = axis.axis_name
+            for tick in labeled:
+                original = tick.draw
+
+                def record(
+                    renderer,
+                    tick=tick,
+                    original=original,
+                    group=group,
+                    axis_name=axis_name,
+                ):
+                    if not any(item[0] is tick for item in group):
+                        x, y = (float(value) for value in tick.label1.get_position())
+                        disp = tick.label1.get_transform().transform((x, y))
+                        group.append(
+                            (tick, float(disp[0]), float(disp[1]), original, axis_name)
+                        )
+                    original(renderer)
+
+                tick.draw = record
+    if not groups:
+        return
+    fig.canvas.draw()
+
+    for group in groups:
+        count = len(group)
+        ax = group[0][0].axes
+        center = ax.transAxes.transform((0.5, 0.5))
+        cx, cy = float(center[0]), float(center[1])
+        for index, (tick, sx, sy, original, axis_name) in enumerate(group):
+            if index == 0:
+                tx = group[1][1] - group[0][1]
+                ty = group[1][2] - group[0][2]
+            elif index == count - 1:
+                tx = group[-1][1] - group[-2][1]
+                ty = group[-1][2] - group[-2][2]
+            else:
+                tx = group[index + 1][1] - group[index - 1][1]
+                ty = group[index + 1][2] - group[index - 1][2]
+            px, py = -ty, tx
+            if px * (sx - cx) + py * (sy - cy) < 0:
+                px, py = -px, -py
+            norm = float(np.hypot(px, py)) or 1.0
+            px, py = px / norm, py / norm
+            extra = gap if index % 2 else 0.0
+            # The short edge's names would otherwise sit in the same corner as
+            # the long edge. Shift that whole edge out, then stagger on top.
+            if axis_name == "y":
+                extra += 1.8 * float(font_px)
+            offx, offy = px * extra, py * extra
+            leader = Line2D(
+                [],
+                [],
+                linewidth=1.0,
+                color="0.45",
+                solid_capstyle="butt",
+                clip_on=False,
+            )
+            # Horizontal words. A diagonal rotation put the name on top of its
+            # own stem and made the two axes unreadable.
+            ha = "left" if px > 0 else "right"
+            va = "bottom" if py > 0 else "top"
+
+            def draw(
+                renderer,
+                tick=tick,
+                original=original,
+                offx=offx,
+                offy=offy,
+                ha=ha,
+                va=va,
+                leader=leader,
+                extra=extra,
+            ):
+                label = tick.label1
+                x, y = (float(value) for value in label.get_position())
+                origin = label.get_transform().transform((x, y))
+                target = (float(origin[0]) + offx, float(origin[1]) + offy)
+                moved = label.get_transform().inverted().transform(target)
+                if extra:
+                    xs, ys = tick.tick1line.get_data()
+                    start = label.get_transform().transform((float(xs[0]), float(ys[0])))
+                    ox, oy = float(start[0]), float(start[1])
+                    tx, ty = float(target[0]), float(target[1])
+                    dx, dy = tx - ox, ty - oy
+                    length = float(np.hypot(dx, dy)) or 1.0
+                    scale = max(0.0, (length - 6.0) / length)
+                    end = label.get_transform().inverted().transform(
+                        (ox + dx * scale, oy + dy * scale)
+                    )
+                    leader.set_transform(label.get_transform())
+                    leader.set_data(
+                        [float(xs[0]), float(end[0])],
+                        [float(ys[0]), float(end[1])],
+                    )
+                    leader.draw(renderer)
+                label.set_position((float(moved[0]), float(moved[1])))
+                label.set_rotation(0)
+                label.set_rotation_mode("anchor")
+                label.set_ha(ha)
+                label.set_va(va)
+                original(renderer)
+
+            tick.draw = draw
 
 
 def _add_detune_indicator(
@@ -281,6 +427,14 @@ def _write_gif(path: Path, frames: list[np.ndarray], frame_ms: int) -> None:
     )
 
 
+def _shift_tag(shift_mhz: float) -> str:
+    """File tag for one detuning, matching ``m0p15`` / ``0p15``."""
+    text = f"{float(shift_mhz):.4g}"
+    if text.startswith("-"):
+        text = "m" + text[1:]
+    return text.replace(".", "p")
+
+
 def plot_qpt(
     qpt_npz: str,
     which: str = "chi",
@@ -290,11 +444,16 @@ def plot_qpt(
     color_gamma: float = 0.5,
     share_z_across_shifts: bool = False,
     frame_ms: int = 500,
+    write_gif: bool = True,
+    write_png: bool = False,
+    shifts_mhz: list[float] | None = None,
 ) -> list[str]:
-    """Draw one GIF per matrix kind and pulse from a saved ``*_qpt.npz``.
+    """Draw city plots from a saved ``*_qpt.npz``.
 
-    Frames run from the most negative target-frame shift to the most positive.
-    The matrices themselves stay in the npz; this only redraws.
+    ``write_gif`` makes one GIF per matrix kind and pulse. Frames run from the
+    most negative target-frame shift to the most positive. ``write_png`` writes
+    one PNG per shift instead, so a single detuning can be compared without
+    stepping through the sweep. ``shifts_mhz`` keeps only those detunings.
     """
     which = _resolve_which(which)
     record = _load_qpt_npz(qpt_npz)
@@ -304,9 +463,16 @@ def plot_qpt(
     if stem.endswith("_qpt"):
         stem = stem[: -len("_qpt")]
 
+    cases = list(record["cases"])
+    if shifts_mhz is not None:
+        wanted = {round(float(shift), 6) for shift in shifts_mhz}
+        cases = [case for case in cases if round(float(case["shift_mhz"]), 6) in wanted]
+        if not cases:
+            raise ValueError(f"no cases at shifts {shifts_mhz}")
+
     keys = list(WHICH_CHOICES[:-1]) if which == "all" else [which]
     pulses: list[str] = []
-    for case in record["cases"]:
+    for case in cases:
         if case["pulse"] not in pulses:
             pulses.append(case["pulse"])
 
@@ -317,18 +483,18 @@ def plot_qpt(
         # spectrum sets the axis for the whole series.
         zlim_for: dict[float, tuple[float, float]] = {}
         if share_z_across_shifts:
-            matrices = [_select_matrix(key, case, record)[0] for case in record["cases"]]
+            matrices = [_select_matrix(key, case, record)[0] for case in cases]
             shared = _city_zlim(matrices)
         else:
             grouped: dict[float, list[np.ndarray]] = {}
-            for case in record["cases"]:
+            for case in cases:
                 grouped.setdefault(float(case["shift_mhz"]), []).append(
                     _select_matrix(key, case, record)[0]
                 )
             zlim_for = {shift: _city_zlim(group) for shift, group in grouped.items()}
             shared = None
         for pulse in pulses:
-            series = [case for case in record["cases"] if case["pulse"] == pulse]
+            series = [case for case in cases if case["pulse"] == pulse]
             series.sort(key=lambda case: float(case["shift_mhz"]))
             shifts = [float(case["shift_mhz"]) for case in series]
             limits = (min(shifts), max(shifts))
@@ -349,12 +515,19 @@ def plot_qpt(
                     detune_mhz=shift,
                     detune_limits=limits,
                 )
-                frames.append(_figure_rgb(fig))
+                if write_png:
+                    out_png = directory / f"{stem}_qpt_{key}_{pulse}_{_shift_tag(shift)}.png"
+                    fig.savefig(out_png, dpi=140, bbox_inches="tight")
+                    paths.append(str(out_png))
+                    print(f"Saved {out_png}")
+                if write_gif:
+                    frames.append(_figure_rgb(fig))
                 plt.close(fig)
-            out_gif = directory / f"{stem}_qpt_{key}_{pulse}.gif"
-            _write_gif(out_gif, frames, frame_ms)
-            paths.append(str(out_gif))
-            print(f"Saved {out_gif}")
+            if write_gif:
+                out_gif = directory / f"{stem}_qpt_{key}_{pulse}.gif"
+                _write_gif(out_gif, frames, frame_ms)
+                paths.append(str(out_gif))
+                print(f"Saved {out_gif}")
     return paths
 
 
